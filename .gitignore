@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Data files
+*.xlsx
+*.csv
+*.txt
+*.tsv
+
+# Output files
+pipeline_output/
+figures/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# Large files
+*.h5
+*.hdf5
+*.bam
+*.sam
+*.fastq
+*.fq.gz
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

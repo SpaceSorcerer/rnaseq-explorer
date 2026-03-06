@@ -1,0 +1,99 @@
+# RNA-seq Analysis Pipeline Configuration
+# ========================================
+# Config file for consolidated pipeline (run_pipeline.py)
+
+# Base directory (where input files are located)
+base_dir: "/mnt/f/MIAT OE v QKI-KO v polyKQI-KO"
+
+# Output directory
+output_dir: "pipeline_output"
+
+# Filtering thresholds
+filtering:
+  # DESeq2 differential expression
+  deseq2:
+    log2fc_cutoff: 0.4        # Minimum absolute log2 fold change
+    padj_cutoff: 0.05          # Maximum adjusted p-value
+    basemean_cutoff: 20        # Minimum base mean expression
+
+  # rMATS alternative splicing
+  splicing:
+    dpsi_cutoff: 0.1           # Minimum absolute delta PSI
+    fdr_cutoff: 0.05           # Maximum FDR
+    pval_cutoff: 0.05          # Maximum p-value (if use_pval_and_fdr is true)
+    use_pval_and_fdr: true     # Require both FDR AND p-value cutoffs
+    use_pval_for_volcano: true # Use p-value for splicing volcano plots
+
+# Conditions to analyze
+conditions:
+  - name: "MIAT_OE_vs_Control"
+    label: "MIAT OE"
+    deseq2_file: "MIAT_OE_DESeq2.xlsx"
+    rmats_dir: "rMATS/MIAT_OE_vs_Control"
+
+  - name: "QKI_KO_vs_WT"
+    label: "QKI-KO"
+    deseq2_file: "QKI-KO_DESeq2.xlsx"
+    rmats_dir: "rMATS/QKI_KO_vs_WT"
+
+  - name: "polyQKI_KO_vs_WT"
+    label: "polyQKI-KO"
+    deseq2_file: "polyQKI-KO_DESeq2.xlsx"
+    rmats_dir: "rMATS/polyQKI_KO_vs_WT"
+
+# Cross-condition comparisons
+comparisons:
+  - name: "MIAT_vs_QKI"
+    condition1: "MIAT_OE_vs_Control"
+    condition2: "QKI_KO_vs_WT"
+
+  - name: "MIAT_vs_polyQKI"
+    condition1: "MIAT_OE_vs_Control"
+    condition2: "polyQKI_KO_vs_WT"
+
+  - name: "QKI_vs_polyQKI"
+    condition1: "QKI_KO_vs_WT"
+    condition2: "polyQKI_KO_vs_WT"
+
+# Figure settings
+figures:
+  dpi: 300                    # Resolution for all figures
+  format: "png"               # Output format (png, pdf, svg)
+  color_palette: "okabe_ito"  # Color-blind friendly palette
+
+  # Which figures to generate (set to false to skip)
+  generate:
+    volcano: true
+    ma_plot: true
+    biotype: true
+    splicing_summary: true
+    splicing_volcano: true
+    venn_diagrams: true
+    concordance_scatter: true
+    violin_plots: true
+    heatmaps: true
+    dashboard: true
+
+# Analysis modules to run (set to false to skip)
+modules:
+  deseq2: true                # Differential expression analysis
+  splicing: true              # Alternative splicing analysis
+  concordance: true           # Cross-condition concordance
+  enrichment: false           # Pathway enrichment (GSEA, GO) - implement later
+  motif: false                # Motif enrichment - implement later
+
+# Export settings
+export:
+  excel: true                 # Export DEG/splicing Excel files
+  figures: true               # Save all figures
+  summary_stats: true         # Generate summary statistics file
+
+# Gene name lookup
+gene_lookup:
+  species: "human"
+  use_enhanced: true          # Use multi-tier lookup (MyGene → BioMart → Ensembl ID)
+
+# Logging
+logging:
+  level: "INFO"               # DEBUG, INFO, WARNING, ERROR
+  file: "pipeline.log"        # Log file name (in output_dir)
