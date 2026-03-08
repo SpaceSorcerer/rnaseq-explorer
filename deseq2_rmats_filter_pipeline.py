@@ -112,6 +112,8 @@ DESEQ2_COLS = {
     "padj":          "padj",
     "pvalue":        "pvalue",
     "biotype":       "biotype",
+    "stat":          "stat",       # Wald test statistic (for GSEA ranking)
+    "lfcSE":         "lfcSE",      # log2FC standard error (shrinkage detection)
 }
 
 RMATS_COLS = {
@@ -193,6 +195,22 @@ ORA_DATABASES = [
 
 GENES_OF_INTEREST = ["MIAT", "QKI", "QKI-5", "QKI-6", "QKI-7"]
 
+# --- Normalized Counts (optional, for PCA/heatmaps) ---
+COUNTS_FILE = ""              # Path to normalized_counts.tsv (genes x samples)
+SAMPLE_METADATA = {}          # {"sample_name": "condition_name", ...} or auto-detect
+
+# --- GSEA Settings (WSF ground truth) ---
+GSEA_RANKING = "stat"         # "stat" (Wald, WSF ground truth) or "log2fc"
+                              # Falls back to log2fc if stat column missing
+GSEA_MIN_SIZE = 15            # WSF uses 15; more rigorous than 5
+GSEA_MAX_SIZE = 500
+GSEA_PERMUTATIONS = 1000      # WSF uses 1000 (was 100); better p-value accuracy
+
+# --- ORA Method ---
+ORA_METHOD = "gprofiler"      # "gprofiler" (WSF ground truth, g:SCS correction)
+                              # or "enrichr" (legacy). Falls back to enrichr if
+                              # gprofiler-official not installed.
+
 # Event type colors for comparison charts
 EVENT_COLORS = {
     "SE":   "#E64B35",
@@ -265,6 +283,453 @@ def load_file(filepath, name="file"):
 
     print(f"  Loaded {name}: {df.shape[0]:,} rows x {df.shape[1]} columns")
     return df
+
+
+def load_counts_matrix(counts_path, sample_metadata=None, conditions=None):
+    """Load a normalized counts matrix (genes x samples) for QC plots.
+
+    Parameters
+    ----------
+    counts_path : str
+        Path to normalized_counts.tsv or .csv (genes as rows, samples as columns).
+    sample_metadata : dict, optional
+        Mapping of sample column names to condition labels.
+        If empty/None, auto-detected from CONDITIONS.
+    conditions : list, optional
+        The CONDITIONS list; used for auto-detecting sample-to-condition mapping
+        when sample_metadata is not provided.
+
+    Returns
+    -------
+    tuple : (pd.DataFrame, dict)
+        (counts_df with genes as index, metadata dict) or (None, {}) on failure.
+    """
+    if not counts_path:
+        print("[INFO] No counts file provided — skipping PCA, correlation heatmap, top DEG heatmap")
+        return None, {}
+
+    path = Path(counts_path)
+    if not path.exists():
+        print(f"[WARNING] Counts file not found: {counts_path}")
+        return None, {}
+
+    # Read the file, auto-detecting R's unnamed first column (index_col=0)
+    ext = path.suffix.lower()
+    sep = "\t" if ext in (".tsv", ".tab") else ","
+    try:
+        # Peek at header to check for unnamed first column (R's row.names export)
+        with open(path, "r") as fh:
+            header_line = fh.readline()
+        first_field = header_line.split(sep)[0].strip().strip('"')
+        if first_field == "" or first_field == "X":
+            df = pd.read_csv(path, sep=sep, index_col=0, quotechar='"')
+            print(f"  [INFO] Detected R row.names format — using first column as index")
+        else:
+            df = pd.read_csv(path, sep=sep, quotechar='"')
+            # If first column looks like gene IDs, set as index
+            if df.columns[0] in ("gene_id", "GeneID", "Geneid", "X") or \
+               df.iloc[:, 0].astype(str).str.upper().str.startswith("ENS").mean() > 0.1:
+                df = df.set_index(df.columns[0])
+                print(f"  [INFO] Set '{df.index.name}' as gene index")
+    except Exception as e:
+        print(f"[WARNING] Failed to load counts file: {e}")
+        return None, {}
+
+    print(f"  Loaded counts matrix: {df.shape[0]:,} genes x {df.shape[1]} samples")
+
+    # Strip Ensembl version suffixes from index
+    idx_str = df.index.astype(str)
+    ens_frac = idx_str.str.upper().str.startswith("ENS").sum() / max(len(idx_str), 1)
+    if ens_frac > 0.1:
+        df.index = idx_str.str.replace(r"\.\d+$", "", regex=True)
+        print(f"  [INFO] Stripped Ensembl version suffixes from gene index")
+
+    # Identify numeric sample columns (drop any non-numeric annotation columns)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if len(numeric_cols) < df.shape[1]:
+        dropped = [c for c in df.columns if c not in numeric_cols]
+        print(f"  [INFO] Dropping non-numeric columns: {dropped}")
+        df = df[numeric_cols]
+
+    if df.shape[1] < 2:
+        print(f"[WARNING] Counts matrix has fewer than 2 sample columns, skipping")
+        return None, {}
+
+    # Auto-detect sample metadata from CONDITIONS if not provided
+    if not sample_metadata and conditions:
+        sample_metadata = {}
+        for col in df.columns:
+            col_lower = str(col).lower()
+            for cond in conditions:
+                cond_name = cond.get("name", "")
+                cond_label = cond.get("label", cond_name)
+                # Try substring match: condition name or label appears in sample name
+                if cond_name.lower() in col_lower or cond_label.lower() in col_lower:
+                    sample_metadata[col] = cond_label
+                    break
+        if sample_metadata:
+            matched = len(sample_metadata)
+            total = len(df.columns)
+            print(f"  [INFO] Auto-detected metadata for {matched}/{total} samples from CONDITIONS")
+        else:
+            print(f"  [INFO] Could not auto-detect sample metadata — "
+                  f"set SAMPLE_METADATA for condition-colored plots")
+
+    if sample_metadata is None:
+        sample_metadata = {}
+
+    return df, sample_metadata
+
+
+def pca_plot(counts_df=None, metadata=None, outdir=None, pca_file=None):
+    """Generate a PCA scatter plot from counts data or a pre-computed PCA file.
+
+    Two modes:
+    - Pre-computed: reads a WSF-style pca_data.csv with columns
+      (sample, PC1, PC2, condition, PC1_variance_pct, PC2_variance_pct).
+    - From counts: log2(counts+1) -> StandardScaler -> sklearn PCA(n_components=2).
+
+    Parameters
+    ----------
+    counts_df : pd.DataFrame, optional
+        Normalized counts matrix (genes x samples). Used when pca_file is None.
+    metadata : dict, optional
+        {sample_name: condition_label} for coloring points.
+    outdir : Path or str
+        Directory to save the plot.
+    pca_file : str or Path, optional
+        Path to pre-computed pca_data.csv (WSF format). Takes priority over counts_df.
+    """
+    if outdir is None:
+        return
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # Okabe-Ito palette for conditions
+    oi_palette = ["#0072B2", "#E69F00", "#009E73", "#CC79A7",
+                  "#56B4E9", "#D55E00", "#F0E442", "#000000"]
+
+    # --- Mode 1: Pre-computed PCA file ---
+    if pca_file is not None:
+        pca_path = Path(pca_file)
+        if not pca_path.exists():
+            print(f"  [WARNING] PCA file not found: {pca_file}")
+            return
+        pca_df = pd.read_csv(pca_path)
+        required = {"sample", "PC1", "PC2"}
+        if not required.issubset(set(pca_df.columns)):
+            print(f"  [WARNING] PCA file missing required columns {required}")
+            return
+
+        conditions_list = pca_df["condition"].unique() if "condition" in pca_df.columns else ["Unknown"]
+        color_map = {c: oi_palette[i % len(oi_palette)] for i, c in enumerate(conditions_list)}
+
+        # Variance explained (from file or unknown)
+        pc1_var = pca_df["PC1_variance_pct"].iloc[0] if "PC1_variance_pct" in pca_df.columns else None
+        pc2_var = pca_df["PC2_variance_pct"].iloc[0] if "PC2_variance_pct" in pca_df.columns else None
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for cond in conditions_list:
+            mask = pca_df["condition"] == cond if "condition" in pca_df.columns else [True] * len(pca_df)
+            subset = pca_df[mask]
+            ax.scatter(subset["PC1"], subset["PC2"], c=color_map.get(cond, "#999999"),
+                       label=cond, s=80, edgecolor="white", linewidth=0.5, zorder=3)
+
+        xlabel = f"PC1 ({pc1_var:.1f}% variance)" if pc1_var is not None else "PC1"
+        ylabel = f"PC2 ({pc2_var:.1f}% variance)" if pc2_var is not None else "PC2"
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title("PCA — Sample Clustering")
+        ax.axhline(0, color="#CCCCCC", linewidth=0.8, zorder=1)
+        ax.axvline(0, color="#CCCCCC", linewidth=0.8, zorder=1)
+        ax.legend(title="Condition", frameon=True)
+        plt.tight_layout()
+        fname = outdir / f"pca_plot.{FIG_FORMAT}"
+        fig.savefig(fname, dpi=FIG_DPI)
+        plt.close(fig)
+        print(f"  Saved: {fname.name}")
+        return
+
+    # --- Mode 2: Compute PCA from counts ---
+    if counts_df is None or counts_df.shape[1] < 2:
+        print("  [INFO] Insufficient data for PCA plot")
+        return
+
+    try:
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+    except ImportError:
+        print("  [WARNING] scikit-learn not installed, skipping PCA plot")
+        print("  Install with: pip install scikit-learn")
+        return
+
+    # log2(counts + 1) transform, transpose so samples are rows
+    log_counts = np.log2(counts_df + 1).T
+
+    # Standardize features (genes) before PCA
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(log_counts)
+
+    pca = PCA(n_components=2)
+    pcs = pca.fit_transform(scaled)
+    pc1_var = pca.explained_variance_ratio_[0] * 100
+    pc2_var = pca.explained_variance_ratio_[1] * 100
+
+    sample_names = counts_df.columns.tolist()
+    if metadata:
+        conditions_list = list(dict.fromkeys(metadata.get(s, "Unknown") for s in sample_names))
+    else:
+        conditions_list = ["Unknown"]
+    color_map = {c: oi_palette[i % len(oi_palette)] for i, c in enumerate(conditions_list)}
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for i, sample in enumerate(sample_names):
+        cond = metadata.get(sample, "Unknown") if metadata else "Unknown"
+        ax.scatter(pcs[i, 0], pcs[i, 1], c=color_map.get(cond, "#999999"),
+                   s=80, edgecolor="white", linewidth=0.5, zorder=3,
+                   label=cond if cond not in [ax.get_legend_handles_labels()[1]] else "")
+
+    # Deduplicate legend labels
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys(), title="Condition", frameon=True)
+
+    ax.set_xlabel(f"PC1 ({pc1_var:.1f}% variance)")
+    ax.set_ylabel(f"PC2 ({pc2_var:.1f}% variance)")
+    ax.set_title("PCA — Sample Clustering")
+    ax.axhline(0, color="#CCCCCC", linewidth=0.8, zorder=1)
+    ax.axvline(0, color="#CCCCCC", linewidth=0.8, zorder=1)
+
+    # Add approximation note
+    ax.text(0.02, 0.02,
+            "PCA computed from log2(counts+1); for publication, use DESeq2 VST (PMID: 25516281)",
+            transform=ax.transAxes, fontsize=7, color="#666666", style="italic",
+            verticalalignment="bottom")
+
+    plt.tight_layout()
+    fname = outdir / f"pca_plot.{FIG_FORMAT}"
+    fig.savefig(fname, dpi=FIG_DPI)
+    plt.close(fig)
+    print(f"  Saved: {fname.name}")
+
+
+def sample_correlation_heatmap(counts_df, metadata, outdir):
+    """Generate a sample-sample correlation heatmap with hierarchical clustering.
+
+    Computes Euclidean distance on log2(counts+1) transformed data and
+    displays a seaborn clustermap with condition color annotations.
+
+    Parameters
+    ----------
+    counts_df : pd.DataFrame
+        Normalized counts matrix (genes x samples).
+    metadata : dict
+        {sample_name: condition_label} for color annotations.
+    outdir : Path or str
+        Directory to save the plot.
+    """
+    if counts_df is None or counts_df.shape[1] < 2:
+        print("  [INFO] Insufficient data for correlation heatmap")
+        return
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # log2(counts + 1) transform
+    log_counts = np.log2(counts_df + 1)
+
+    # Compute sample-sample correlation matrix
+    corr = log_counts.corr(method="pearson")
+
+    # Build condition color annotation
+    oi_palette = ["#0072B2", "#E69F00", "#009E73", "#CC79A7",
+                  "#56B4E9", "#D55E00", "#F0E442", "#000000"]
+    if metadata:
+        conditions_list = list(dict.fromkeys(metadata.get(s, "Unknown") for s in corr.columns))
+        color_map = {c: oi_palette[i % len(oi_palette)] for i, c in enumerate(conditions_list)}
+        col_colors = pd.Series(
+            {s: color_map.get(metadata.get(s, "Unknown"), "#999999") for s in corr.columns},
+            name="Condition"
+        )
+    else:
+        col_colors = None
+
+    try:
+        g = sns.clustermap(
+            corr,
+            method="average",
+            metric="euclidean",
+            cmap="viridis",
+            vmin=corr.values[np.triu_indices_from(corr.values, k=1)].min() if len(corr) > 1 else 0,
+            vmax=1.0,
+            col_colors=col_colors,
+            row_colors=col_colors,
+            linewidths=0.5,
+            figsize=(max(8, len(corr) * 0.6), max(7, len(corr) * 0.55)),
+            dendrogram_ratio=0.12,
+            cbar_pos=(0.02, 0.8, 0.03, 0.15),
+        )
+        g.ax_heatmap.set_title("Sample Correlation (Pearson, log2 counts+1)", pad=20)
+
+        # Add legend for condition colors
+        if metadata:
+            legend_patches = [mpatches.Patch(color=color_map[c], label=c) for c in conditions_list]
+            g.ax_heatmap.legend(
+                handles=legend_patches, title="Condition",
+                bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=9
+            )
+
+        fname = outdir / f"sample_correlation_heatmap.{FIG_FORMAT}"
+        g.savefig(fname, dpi=FIG_DPI, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {fname.name}")
+    except Exception as e:
+        print(f"  [WARNING] Failed to generate correlation heatmap: {e}")
+
+
+def top_deg_heatmap(counts_df, condition_results, condition_labels,
+                    metadata, outdir):
+    """Generate a heatmap of top 50 DEGs (by padj) across all conditions.
+
+    Selects the top 50 genes by adjusted p-value across all conditions
+    (deduplicated), then displays z-scored log2(counts+1) expression
+    with hierarchical clustering.
+
+    Parameters
+    ----------
+    counts_df : pd.DataFrame
+        Normalized counts matrix (genes x samples).
+    condition_results : dict
+        Pipeline condition_results structure with deseq2_filtered data.
+    condition_labels : dict
+        Maps condition name -> human-readable label.
+    metadata : dict
+        {sample_name: condition_label} for color annotations.
+    outdir : Path or str
+        Directory to save the plot.
+    """
+    if counts_df is None or counts_df.shape[1] < 2:
+        print("  [INFO] Insufficient counts data for top DEG heatmap")
+        return
+
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    padj_col = DESEQ2_COLS.get("padj", "padj")
+    gene_id_col = DESEQ2_COLS.get("gene_id", "gene_id")
+    gene_name_col = DESEQ2_COLS.get("gene_name", "gene_name")
+
+    # Collect top genes by padj across all conditions (deduplicated)
+    all_top_genes = []
+    for cond_name, data in condition_results.items():
+        deg_df = data.get("deseq2_filtered", {}).get("all_genes", pd.DataFrame())
+        if len(deg_df) == 0:
+            continue
+        # Get gene IDs sorted by padj
+        if padj_col in deg_df.columns and gene_id_col in deg_df.columns:
+            sorted_df = deg_df.sort_values(padj_col)
+            all_top_genes.extend(
+                sorted_df[gene_id_col].dropna().astype(str).tolist()
+            )
+
+    if not all_top_genes:
+        print("  [INFO] No DEGs found for top DEG heatmap")
+        return
+
+    # Deduplicate while preserving order (best padj first), take top 50
+    seen = set()
+    unique_genes = []
+    for g in all_top_genes:
+        if g not in seen:
+            seen.add(g)
+            unique_genes.append(g)
+    top_genes = unique_genes[:50]
+
+    # Filter counts to top genes (match by index)
+    counts_idx = counts_df.index.astype(str)
+    mask = counts_idx.isin(top_genes)
+    if mask.sum() == 0:
+        # Try stripping Ensembl versions from top_genes too
+        top_genes_stripped = [g.split(".")[0] for g in top_genes]
+        mask = counts_idx.isin(top_genes_stripped)
+    if mask.sum() == 0:
+        print(f"  [INFO] None of the top DEGs found in counts matrix — skipping heatmap")
+        return
+
+    subset = counts_df.loc[mask].copy()
+    print(f"  Top DEG heatmap: {len(subset)} genes matched in counts matrix")
+
+    # log2(counts+1) then z-score per gene (row)
+    log_counts = np.log2(subset + 1)
+    from scipy import stats
+    z_scored = log_counts.apply(lambda row: stats.zscore(row, nan_policy="omit"), axis=1)
+    # Cap z-scores at +/-3 to avoid extreme outliers dominating the colormap
+    z_scored = z_scored.clip(-3, 3)
+
+    # Try to use gene names as row labels if available
+    # Build a mapping from gene IDs in condition_results
+    id_to_name = {}
+    for cond_name, data in condition_results.items():
+        raw_df = data.get("deseq2_raw", pd.DataFrame())
+        if gene_id_col in raw_df.columns and gene_name_col in raw_df.columns:
+            for _, row in raw_df[[gene_id_col, gene_name_col]].dropna().iterrows():
+                gid = str(row[gene_id_col])
+                gname = str(row[gene_name_col])
+                if gid and gname and gname != "nan":
+                    id_to_name[gid] = gname
+    if id_to_name:
+        z_scored.index = [id_to_name.get(str(g), str(g)) for g in z_scored.index]
+
+    # Build condition color annotation
+    oi_palette = ["#0072B2", "#E69F00", "#009E73", "#CC79A7",
+                  "#56B4E9", "#D55E00", "#F0E442", "#000000"]
+    if metadata:
+        conditions_unique = list(dict.fromkeys(metadata.get(s, "Unknown") for s in z_scored.columns))
+        color_map = {c: oi_palette[i % len(oi_palette)] for i, c in enumerate(conditions_unique)}
+        col_colors = pd.Series(
+            {s: color_map.get(metadata.get(s, "Unknown"), "#999999") for s in z_scored.columns},
+            name="Condition"
+        )
+    else:
+        col_colors = None
+
+    try:
+        n_genes = len(z_scored)
+        fig_height = max(8, n_genes * 0.25)
+        g = sns.clustermap(
+            z_scored,
+            cmap="RdBu_r",
+            center=0,
+            vmin=-3,
+            vmax=3,
+            col_colors=col_colors,
+            method="ward",
+            metric="euclidean",
+            linewidths=0.3,
+            figsize=(max(8, len(z_scored.columns) * 0.8), fig_height),
+            dendrogram_ratio=(0.1, 0.08),
+            cbar_pos=(0.02, 0.8, 0.03, 0.15),
+            yticklabels=True,
+        )
+        g.ax_heatmap.set_title("Top 50 DEGs — z-scored log2(counts+1)", pad=20)
+        g.ax_heatmap.set_ylabel("")
+        g.ax_heatmap.tick_params(axis="y", labelsize=7)
+
+        # Add condition legend
+        if metadata:
+            legend_patches = [mpatches.Patch(color=color_map[c], label=c)
+                              for c in conditions_unique]
+            g.ax_heatmap.legend(
+                handles=legend_patches, title="Condition",
+                bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=9
+            )
+
+        fname = outdir / f"top_deg_heatmap.{FIG_FORMAT}"
+        g.savefig(fname, dpi=FIG_DPI, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {fname.name}")
+    except Exception as e:
+        print(f"  [WARNING] Failed to generate top DEG heatmap: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +839,7 @@ def validate_columns(df, required_cols, name="file"):
 _DESEQ2_ALIASES = {
     "gene_id":   ["gene_id", "ensembl_gene_id", "ensembl_geneid", "ensemblgeneid",
                   "ensemblgene", "enzemblgeneid", "ensgene",
-                  "geneid", "gene", "id", "feature_id"],
+                  "geneid", "gene", "id", "feature_id", "X"],
     "gene_name": ["gene_name", "gene_symbol", "symbol", "hgnc_symbol",
                   "name", "genename", "external_gene_name", "mgi_symbol"],
     "log2fc":    ["log2foldchange", "log2fc", "log2_fold_change", "lfc",
@@ -386,6 +851,8 @@ _DESEQ2_ALIASES = {
     "pvalue":    ["pvalue", "pval", "p.value", "p_value", "p", "rawp"],
     "biotype":   ["biotype", "gene_biotype", "gene_type", "transcript_biotype",
                   "transcript_type"],
+    "stat":      ["stat", "wald_statistic", "test_stat", "statistic"],
+    "lfcSE":     ["lfcse", "lfc_se", "std_error", "lfcstderror"],
 }
 
 # Common column name aliases for rMATS files.
@@ -553,6 +1020,26 @@ def normalize_deseq2_columns(df, file_label="DESeq2 file"):
         if ens_frac > 0.1:
             df = df.copy()
             df[id_col] = _strip_ensembl_version(df[id_col])
+
+    # Detect stat and lfcSE columns (optional — silent if missing)
+    stat_col = DESEQ2_COLS.get("stat", "stat")
+    lfcse_col = DESEQ2_COLS.get("lfcSE", "lfcSE")
+    log2fc_col = DESEQ2_COLS.get("log2fc", "log2FoldChange")
+
+    if stat_col and stat_col in df.columns:
+        pass  # stat column present — available for GSEA Wald ranking
+    if lfcse_col and lfcse_col in df.columns and log2fc_col and log2fc_col in df.columns:
+        # Check for likely LFC shrinkage: if median lfcSE/|log2FC| < 0.3,
+        # DESeq2 apeglm/ashr shrinkage was likely applied
+        lfc_abs = df[log2fc_col].abs()
+        lfcse_vals = df[lfcse_col]
+        # Guard against division by zero: only compute ratio where |log2FC| > 0
+        valid = (lfc_abs > 0) & lfcse_vals.notna()
+        if valid.sum() > 0:
+            ratio = (lfcse_vals[valid] / lfc_abs[valid]).median()
+            if ratio < 0.3:
+                print(f"  [INFO] lfcSE/|log2FC| median ratio = {ratio:.3f} — "
+                      f"likely LFC shrinkage applied (apeglm/ashr)")
 
     return df
 
@@ -3249,12 +3736,26 @@ def run_gsea_enrichment(condition_results, condition_labels, outdir):
             continue
 
         # Create ranked gene list from full unfiltered data
-        ranked_genes = deseq2_full[[gene_name_col, log2fc_col]].dropna()
-        # Remove duplicate gene names (keep the one with largest |log2FC|)
-        ranked_genes["abs_fc"] = ranked_genes[log2fc_col].abs()
-        ranked_genes = ranked_genes.sort_values("abs_fc", ascending=False).drop_duplicates(subset=gene_name_col, keep="first").drop(columns="abs_fc")
-        ranked_genes = ranked_genes.sort_values(log2fc_col, ascending=False)
-        ranked_genes = ranked_genes.set_index(gene_name_col)[log2fc_col]
+        # Determine ranking column: Wald statistic (WSF method) or log2FC (fallback)
+        stat_col = DESEQ2_COLS.get("stat", "stat")
+        use_stat = (GSEA_RANKING == "stat" and stat_col in deseq2_full.columns
+                    and deseq2_full[stat_col].notna().sum() > 0)
+        if use_stat:
+            rank_col = stat_col
+            print(f"    Ranking by Wald statistic (column: '{stat_col}') — WSF method")
+        else:
+            rank_col = log2fc_col
+            if GSEA_RANKING == "stat":
+                print(f"    [INFO] Wald stat column not found — falling back to log2FC ranking")
+            else:
+                print(f"    Ranking by log2FC (column: '{log2fc_col}')")
+
+        ranked_genes = deseq2_full[[gene_name_col, rank_col]].dropna()
+        # Remove duplicate gene names (keep the one with largest absolute rank value)
+        ranked_genes["abs_rank"] = ranked_genes[rank_col].abs()
+        ranked_genes = ranked_genes.sort_values("abs_rank", ascending=False).drop_duplicates(subset=gene_name_col, keep="first").drop(columns="abs_rank")
+        ranked_genes = ranked_genes.sort_values(rank_col, ascending=False)
+        ranked_genes = ranked_genes.set_index(gene_name_col)[rank_col]
 
         if len(ranked_genes) < 15:
             print(f"    Too few genes ({len(ranked_genes)}) for GSEA in {cond_label}")
@@ -3273,9 +3774,9 @@ def run_gsea_enrichment(condition_results, condition_labels, outdir):
                     rnk=ranked_genes,
                     gene_sets=db,
                     outdir=str(cond_gsea_dir / db.replace(":", "_")),
-                    min_size=5,
-                    max_size=500,
-                    permutation_num=100,
+                    min_size=GSEA_MIN_SIZE,
+                    max_size=GSEA_MAX_SIZE,
+                    permutation_num=GSEA_PERMUTATIONS,
                     seed=42,
                     verbose=False,
                 )
@@ -3345,10 +3846,31 @@ _CATEGORY_COLORS = {
     "Reactome": "#56B4E9",  # sky blue
 }
 
+# Species mapping for g:Profiler (common model organisms)
+_GPROFILER_SPECIES = {
+    "human":     "hsapiens",
+    "mouse":     "mmusculus",
+    "rat":       "rnorvegicus",
+    "zebrafish": "drerio",
+    "fly":       "dmelanogaster",
+    "worm":      "celegans",
+}
 
-def run_go_enrichment(condition_results, condition_labels, outdir,
+
+def run_gprofiler_ora(condition_results, condition_labels, outdir,
                       _best_gene_key_fn=None, DESEQ2_COLS_map=None):
-    """Run gseapy over-representation analysis (ORA) for up/down DEGs.
+    """Run g:Profiler over-representation analysis (ORA) for up/down DEGs.
+
+    Uses the gprofiler-official Python package with g:SCS FDR correction
+    (hierarchy-aware, superior to Benjamini-Hochberg for GO terms).
+    Queries GO:BP, GO:MF, GO:CC, KEGG, and Reactome.
+
+    Output DataFrame columns match the Enrichr schema exactly (Term,
+    Adjusted_P_value, Overlap_count, Category) so that
+    go_enrichment_combined_plot() works unchanged.
+
+    Falls back to Enrichr (via run_go_enrichment with ORA_METHOD override)
+    if gprofiler-official is not installed.
 
     Parameters
     ----------
@@ -3365,8 +3887,192 @@ def run_go_enrichment(condition_results, condition_labels, outdir,
 
     Returns
     -------
+    dict : go_results[cond_name] = {"up": DataFrame, "down": DataFrame}
+    """
+    try:
+        from gprofiler import GProfiler
+    except ImportError:
+        print("  [INFO] gprofiler-official not installed — falling back to Enrichr")
+        print("  Install with: pip install gprofiler-official")
+        # Temporarily override ORA_METHOD to avoid infinite recursion
+        return run_go_enrichment(condition_results, condition_labels, outdir,
+                                _best_gene_key_fn=_best_gene_key_fn,
+                                DESEQ2_COLS_map=DESEQ2_COLS_map,
+                                _force_enrichr=True)
+
+    outdir = Path(outdir)
+    ora_dir = outdir / "go_ora"
+    ora_dir.mkdir(parents=True, exist_ok=True)
+
+    if DESEQ2_COLS_map is None:
+        DESEQ2_COLS_map = DESEQ2_COLS
+    if _best_gene_key_fn is None:
+        _best_gene_key_fn = _best_gene_key
+
+    print("\n-- Running g:Profiler ORA (WSF method) --")
+
+    # Map species name to g:Profiler organism code
+    organism = _GPROFILER_SPECIES.get(SPECIES.lower(), "hsapiens")
+    print(f"  Organism: {organism}")
+
+    gp = GProfiler(return_dataframe=True)
+
+    # g:Profiler source names -> our category labels
+    source_to_category = {
+        "GO:BP": "BP",
+        "GO:MF": "MF",
+        "GO:CC": "CC",
+        "KEGG": "KEGG",
+        "REAC": "Reactome",
+    }
+    sources = list(source_to_category.keys())
+
+    go_results = {}
+
+    for cond_name, data in condition_results.items():
+        cond_label = condition_labels.get(cond_name, cond_name)
+
+        deg_df = data.get("deseq2_filtered", {}).get("all_genes", pd.DataFrame())
+        if len(deg_df) == 0:
+            print(f"  No DEGs for {cond_label}, skipping ORA")
+            continue
+
+        # Determine gene column — prefer symbols for g:Profiler
+        gene_col, gene_type = _best_gene_key_fn(deg_df)
+        if "Ensembl" in gene_type:
+            name_col = DESEQ2_COLS_map.get("gene_name", "")
+            if name_col and name_col in deg_df.columns:
+                gene_col = name_col
+                print(f"  {cond_label}: using gene symbols ({gene_col}) for ORA "
+                      f"instead of Ensembl IDs")
+
+        # Split by direction
+        if "direction" not in deg_df.columns:
+            print(f"  WARNING: no 'direction' column in {cond_label} DEGs, skipping")
+            continue
+
+        up_genes = (
+            deg_df.loc[deg_df["direction"] == "up", gene_col]
+            .dropna().astype(str).unique().tolist()
+        )
+        down_genes = (
+            deg_df.loc[deg_df["direction"] == "down", gene_col]
+            .dropna().astype(str).unique().tolist()
+        )
+
+        cond_go = {}
+
+        for direction, gene_list in [("up", up_genes), ("down", down_genes)]:
+            n = len(gene_list)
+            if n < 5:
+                print(f"  {cond_label} ({direction}): only {n} genes — "
+                      f"too few for ORA, skipping")
+                cond_go[direction] = pd.DataFrame()
+                continue
+
+            print(f"  Running g:Profiler ORA for {cond_label} ({direction}: {n} genes)...")
+
+            try:
+                result = gp.profile(
+                    organism=organism,
+                    query=gene_list,
+                    sources=sources,
+                    significance_threshold_method="g_SCS",
+                )
+
+                if result is None or len(result) == 0:
+                    print(f"    No enriched terms for {cond_label} ({direction})")
+                    cond_go[direction] = pd.DataFrame()
+                    continue
+
+                # Filter by padj < 0.05
+                if "p_value" in result.columns:
+                    result = result[result["p_value"] < 0.05].copy()
+
+                if len(result) == 0:
+                    print(f"    No terms pass padj < 0.05 for {cond_label} ({direction})")
+                    cond_go[direction] = pd.DataFrame()
+                    continue
+
+                # Map g:Profiler columns to Enrichr-compatible schema
+                # g:Profiler returns: source, native, name, p_value, intersection_size, ...
+                rows = []
+                for _, row in result.iterrows():
+                    source = row.get("source", "")
+                    category = source_to_category.get(source, source)
+                    rows.append({
+                        "Term": row.get("name", row.get("native", "")),
+                        "Adjusted_P_value": row.get("p_value", 1.0),
+                        "Overlap_count": int(row.get("intersection_size", 0)),
+                        "Category": category,
+                    })
+
+                direction_df = pd.DataFrame(rows)
+
+                # Top 10 terms per database (category)
+                top_rows = []
+                for cat in direction_df["Category"].unique():
+                    cat_df = direction_df[direction_df["Category"] == cat]
+                    cat_df = cat_df.sort_values("Adjusted_P_value").head(10)
+                    top_rows.append(cat_df)
+
+                if top_rows:
+                    direction_df = pd.concat(top_rows, ignore_index=True)
+                    print(f"    Found {len(direction_df)} enriched terms across "
+                          f"{direction_df['Category'].nunique()} databases")
+                else:
+                    direction_df = pd.DataFrame()
+
+                cond_go[direction] = direction_df
+
+            except Exception as e:
+                print(f"    ERROR running g:Profiler for {cond_label} ({direction}): {e}")
+                cond_go[direction] = pd.DataFrame()
+
+        go_results[cond_name] = cond_go
+
+        # Export per-condition ORA summary
+        for direction in ("up", "down"):
+            df = cond_go.get(direction, pd.DataFrame())
+            if len(df) > 0:
+                fname = ora_dir / f"gprofiler_ora_{cond_name}_{direction}.csv"
+                df.to_csv(fname, index=False)
+                print(f"    Saved: {fname.name}")
+
+    print(f"  g:Profiler ORA complete: {len(go_results)} conditions processed")
+    return go_results
+
+
+def run_go_enrichment(condition_results, condition_labels, outdir,
+                      _best_gene_key_fn=None, DESEQ2_COLS_map=None,
+                      _force_enrichr=False):
+    """Run gseapy over-representation analysis (ORA) for up/down DEGs.
+
+    Parameters
+    ----------
+    condition_results : dict
+        Pipeline condition_results structure.
+    condition_labels : dict
+        Maps condition name -> human-readable label.
+    outdir : Path
+        Output directory (a go_ora/ subdirectory will be created).
+    _best_gene_key_fn : callable, optional
+        Function from the pipeline. If None, uses module-level _best_gene_key.
+    DESEQ2_COLS_map : dict, optional
+        Column-name mapping. If None, uses module-level DESEQ2_COLS.
+    _force_enrichr : bool, optional
+        If True, skip g:Profiler routing (used internally for fallback).
+
+    Returns
+    -------
     dict  :  go_results[cond_name] = {"up": DataFrame, "down": DataFrame}
     """
+    # Route to g:Profiler if configured (unless forced to Enrichr by fallback)
+    if ORA_METHOD == "gprofiler" and not _force_enrichr:
+        return run_gprofiler_ora(condition_results, condition_labels, outdir,
+                                _best_gene_key_fn=_best_gene_key_fn,
+                                DESEQ2_COLS_map=DESEQ2_COLS_map)
+
     try:
         import gseapy as gp
     except ImportError:
@@ -5734,6 +6440,29 @@ def main():
     # ===================================================================
     condition_results = {}
     condition_labels = {}
+    counts_df = None
+    sample_metadata = {}
+
+    # Load normalized counts matrix if provided (for PCA, heatmaps)
+    if COUNTS_FILE:
+        counts_df, sample_metadata = load_counts_matrix(
+            COUNTS_FILE, SAMPLE_METADATA, CONDITIONS)
+        if counts_df is not None:
+            qc_dir = outdir / "qc_plots"
+            qc_dir.mkdir(parents=True, exist_ok=True)
+            print("\n-- QC: PCA Plot --")
+            pca_plot(counts_df=counts_df, metadata=sample_metadata, outdir=qc_dir)
+            print("\n-- QC: Sample Correlation Heatmap --")
+            sample_correlation_heatmap(counts_df, sample_metadata, qc_dir)
+    else:
+        print("[INFO] No counts file — skipping PCA, correlation heatmap, top DEG heatmap")
+
+    # Per-condition PCA files (from WSF output, if provided)
+    for cond in CONDITIONS:
+        if cond.get("pca_file"):
+            cond_fig = outdir / cond["name"] / "figures"
+            cond_fig.mkdir(parents=True, exist_ok=True)
+            pca_plot(pca_file=cond["pca_file"], outdir=cond_fig)
 
     for cond in CONDITIONS:
         cond_name = cond["name"]
@@ -5754,8 +6483,8 @@ def main():
         print("\n-- Loading DESeq2 --")
         deseq2_raw = load_file(cond["deseq2_file"], f"DESeq2 ({cond_label})")
         deseq2_raw = normalize_deseq2_columns(deseq2_raw, f"DESeq2 ({cond_label})")
-        # gene_name and biotype are optional — many DESeq2 files have only Ensembl IDs
-        optional_keys = {"biotype", "gene_name"}
+        # gene_name, biotype, stat, lfcSE are optional — many DESeq2 files lack these
+        optional_keys = {"biotype", "gene_name", "stat", "lfcSE"}
         required_deseq2 = [v for k, v in DESEQ2_COLS.items()
                            if v is not None and k not in optional_keys]
         validate_columns(deseq2_raw, required_deseq2, f"DESeq2 ({cond_label})")
@@ -5879,6 +6608,12 @@ def main():
     log2fc_df = deseq2_log2fc_heatmap(
         condition_results, condition_labels, comparison_fig_dir)
     cross_data["log2fc_matrix"] = log2fc_df
+
+    # Top DEG heatmap (requires counts matrix)
+    if counts_df is not None:
+        print("\n-- Top DEG Expression Heatmap --")
+        top_deg_heatmap(counts_df, condition_results, condition_labels,
+                        sample_metadata, comparison_fig_dir)
 
     print("\n-- Pairwise log2FC Scatter --")
     pairwise_log2fc_scatter(condition_results, condition_labels, comparison_fig_dir)
@@ -6011,6 +6746,8 @@ def run_pipeline(config: dict):
     global COLOR_UP, COLOR_DOWN, COLOR_NS
     global INTERACTIVE_PLOTS, DESEQ2_COLS, RMATS_COLS
     global GSEA_DATABASES, ORA_DATABASES, GENES_OF_INTEREST
+    global COUNTS_FILE, SAMPLE_METADATA, GSEA_RANKING, GSEA_MIN_SIZE, GSEA_MAX_SIZE
+    global GSEA_PERMUTATIONS, ORA_METHOD
 
     CONDITIONS           = config["CONDITIONS"]
     OUTPUT_DIR           = config["OUTPUT_DIR"]
@@ -6036,6 +6773,13 @@ def run_pipeline(config: dict):
     GSEA_DATABASES       = list(config.get("GSEA_DATABASES", GSEA_DATABASES))
     ORA_DATABASES        = list(config.get("ORA_DATABASES", ORA_DATABASES))
     GENES_OF_INTEREST    = list(config.get("GENES_OF_INTEREST", GENES_OF_INTEREST))
+    COUNTS_FILE          = str(config.get("COUNTS_FILE", COUNTS_FILE))
+    SAMPLE_METADATA      = dict(config.get("SAMPLE_METADATA", SAMPLE_METADATA))
+    GSEA_RANKING         = str(config.get("GSEA_RANKING", GSEA_RANKING))
+    GSEA_MIN_SIZE        = int(config.get("GSEA_MIN_SIZE", GSEA_MIN_SIZE))
+    GSEA_MAX_SIZE        = int(config.get("GSEA_MAX_SIZE", GSEA_MAX_SIZE))
+    GSEA_PERMUTATIONS    = int(config.get("GSEA_PERMUTATIONS", GSEA_PERMUTATIONS))
+    ORA_METHOD           = str(config.get("ORA_METHOD", ORA_METHOD))
 
     main()
 

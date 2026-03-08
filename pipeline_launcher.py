@@ -151,6 +151,13 @@ class PipelineLauncherApp(tk.Tk):
         # Genes of interest for labeled volcano plots
         self.genes_of_interest_var = tk.StringVar(value="MIAT, QKI, QKI-5, QKI-6, QKI-7")
 
+        # WSF-Lab-Pipeline feature variables
+        self.counts_file_var      = tk.StringVar(value="")
+        self.gsea_ranking_var     = tk.StringVar(value="stat")
+        self.gsea_min_size_var    = tk.StringVar(value="15")
+        self.gsea_permutations_var = tk.StringVar(value="1000")
+        self.ora_method_var       = tk.StringVar(value="gprofiler")
+
         # GSEA database selection
         self.gsea_db_vars = {}
         for db in ["GO_Biological_Process_2023", "GO_Cellular_Component_2023",
@@ -407,6 +414,17 @@ class PipelineLauncherApp(tk.Tk):
         ttk.Button(out_frame, text="Browse…",
                    command=self._browse_output_dir, width=9).grid(
             row=0, column=2, padx=6, pady=4)
+
+        ttk.Label(out_frame, text="Normalized Counts File:", width=20, anchor="e").grid(
+            row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Entry(out_frame, textvariable=self.counts_file_var, width=60).grid(
+            row=1, column=1, sticky="ew", pady=4)
+        ttk.Button(out_frame, text="Browse…",
+                   command=self._browse_counts_file, width=9).grid(
+            row=1, column=2, padx=6, pady=4)
+        ttk.Label(out_frame, text="(optional, for PCA/heatmaps)",
+                  foreground="gray").grid(row=2, column=1, sticky="w", pady=(0, 4))
+
         out_frame.columnconfigure(1, weight=1)
 
         fig_frame = ttk.LabelFrame(tab, text="  Figure Settings  ", padding=(12, 8))
@@ -449,6 +467,14 @@ class PipelineLauncherApp(tk.Tk):
         path = filedialog.askdirectory(title="Select output directory")
         if path:
             self.output_dir_var.set(path)
+
+    def _browse_counts_file(self):
+        path = filedialog.askopenfilename(
+            title="Select normalized counts file",
+            filetypes=[("TSV / CSV", "*.tsv *.csv *.txt"),
+                       ("All files", "*.*")])
+        if path:
+            self.counts_file_var.set(path)
 
     def _pick_color(self, var):
         current = var.get()
@@ -528,6 +554,43 @@ class PipelineLauncherApp(tk.Tk):
         ttk.Label(gen_frame, text="Comma-separated gene symbols to highlight on volcano plots",
                   foreground="gray").pack(anchor="w")
 
+        # --- GSEA Method Settings (WSF-Lab-Pipeline) ---
+        gsea_settings_frame = ttk.LabelFrame(tab, text="GSEA Method Settings", padding=8)
+        gsea_settings_frame.pack(fill="x", pady=(0, 8))
+
+        row_gsea_rank = ttk.Frame(gsea_settings_frame)
+        row_gsea_rank.pack(fill="x", pady=2)
+        ttk.Label(row_gsea_rank, text="GSEA Ranking Method:").pack(side="left")
+        ttk.Combobox(row_gsea_rank, textvariable=self.gsea_ranking_var, width=18,
+                     values=["stat", "log2fc"],
+                     state="readonly").pack(side="left", padx=(6, 0))
+        ttk.Label(row_gsea_rank,
+                  text="(Wald statistic is more rigorous; falls back to log2FC if stat column missing)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
+
+        row_gsea_min = ttk.Frame(gsea_settings_frame)
+        row_gsea_min.pack(fill="x", pady=2)
+        ttk.Label(row_gsea_min, text="GSEA Min Gene Set Size:").pack(side="left")
+        ttk.Spinbox(row_gsea_min, textvariable=self.gsea_min_size_var, width=8,
+                    from_=1, to=100, increment=1).pack(side="left", padx=(6, 0))
+
+        row_gsea_perm = ttk.Frame(gsea_settings_frame)
+        row_gsea_perm.pack(fill="x", pady=2)
+        ttk.Label(row_gsea_perm, text="GSEA Permutations:").pack(side="left")
+        ttk.Spinbox(row_gsea_perm, textvariable=self.gsea_permutations_var, width=8,
+                    from_=100, to=10000, increment=100).pack(side="left", padx=(6, 0))
+
+        # --- ORA Method Selection ---
+        row_ora = ttk.Frame(gsea_settings_frame)
+        row_ora.pack(fill="x", pady=2)
+        ttk.Label(row_ora, text="ORA Method:").pack(side="left")
+        ttk.Combobox(row_ora, textvariable=self.ora_method_var, width=18,
+                     values=["gprofiler", "enrichr"],
+                     state="readonly").pack(side="left", padx=(6, 0))
+        ttk.Label(row_ora,
+                  text="(g:Profiler uses hierarchy-aware FDR; matches WSF-Lab methodology)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
+
     # ---- Tab 5: Column Names (Advanced) -----------------------------------
 
     def _build_columns_tab(self):
@@ -604,6 +667,8 @@ class PipelineLauncherApp(tk.Tk):
             (self.dpsi_var,      "| ΔΨ | threshold"),
             (self.dpi_var,       "DPI"),
             (self.font_size_var, "Font size"),
+            (self.gsea_min_size_var,    "GSEA Min Gene Set Size"),
+            (self.gsea_permutations_var,"GSEA Permutations"),
         ]
         for var, lbl in numeric_fields:
             try:
@@ -613,6 +678,10 @@ class PipelineLauncherApp(tk.Tk):
 
         if not self.output_dir_var.get().strip():
             errors.append("Output directory cannot be empty.")
+
+        counts_path = self.counts_file_var.get().strip()
+        if counts_path and not Path(counts_path).is_file():
+            errors.append(f"Normalized counts file not found:\n  {counts_path}")
 
         if errors:
             messagebox.showerror("Validation Errors", "\n\n".join(errors))
@@ -658,6 +727,12 @@ class PipelineLauncherApp(tk.Tk):
             "GENES_OF_INTEREST":    [g.strip() for g in self.genes_of_interest_var.get().split(",") if g.strip()],
             "GSEA_DATABASES":       [db for db, var in self.gsea_db_vars.items() if var.get()],
             "ORA_DATABASES":        [db for db, var in self.ora_db_vars.items() if var.get()],
+            "COUNTS_FILE":          self.counts_file_var.get().strip(),
+            "GSEA_RANKING":         self.gsea_ranking_var.get(),
+            "GSEA_MIN_SIZE":        int(self.gsea_min_size_var.get()),
+            "GSEA_MAX_SIZE":        500,
+            "GSEA_PERMUTATIONS":    int(self.gsea_permutations_var.get()),
+            "ORA_METHOD":           self.ora_method_var.get(),
             "DESEQ2_COLS": {k: self.col_vars[f"deseq2_{k}"].get()
                             for k in _DESEQ2_COL_DEFAULTS},
             "RMATS_COLS":  {k: self.col_vars[f"rmats_{k}"].get()
