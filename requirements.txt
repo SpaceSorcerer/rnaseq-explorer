@@ -1,0 +1,13 @@
+pandas>=1.5
+numpy>=1.23
+matplotlib>=3.6
+seaborn>=0.12
+openpyxl>=3.0
+scipy>=1.9
+gseapy>=1.0
+adjustText>=0.9
+upsetplot>=0.6
+mygene>=3.2
+plotly>=5.0
+python-pptx>=0.6
+matplotlib-venn>=0.11
