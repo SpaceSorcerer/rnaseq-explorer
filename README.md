@@ -1,140 +1,94 @@
-# RNA-seq Analysis Pipeline
+# RNA-seq DESeq2 + rMATS Analysis Pipeline
 
-Modular RNA-seq differential expression and alternative splicing analysis pipeline for human embryonic stem cells (hESCs).
+A comprehensive pipeline for differential expression (DESeq2) and alternative splicing (rMATS) analysis with publication-quality figures, GO/GSEA enrichment, and GraphPad Prism export.
 
-## Overview
+## Architecture
 
-This pipeline performs comprehensive RNA-seq analysis including:
-- DESeq2 differential expression analysis
-- rMATS alternative splicing analysis
-- Cross-condition concordance analysis
-- Publication-quality figure generation
-- GSEA and GO enrichment analysis
+Two files:
 
-## Features
-
-- **Modular design**: Separate modules for each analysis step
-- **Config-driven**: All parameters in YAML config file
-- **User-friendly**: Single CLI entry point with comprehensive options
-- **Publication-ready**: 300 DPI figures with color-blind friendly Okabe-Ito palette
-- **Flexible**: Works for any RNA-seq experiment, not just MIAT/QKI
+| File | Purpose |
+|------|---------|
+| `pipeline_launcher.py` | Tkinter GUI — configure and run without editing code |
+| `deseq2_rmats_filter_pipeline.py` | Analysis engine — all filtering, figures, enrichment, export |
 
 ## Installation
 
 ```bash
-# Clone repository
-git clone https://github.com/SpaceSorcerer/rnaseq-pipeline.git
+git clone git@github.com:SpaceSorcerer/rnaseq-pipeline.git
 cd rnaseq-pipeline
-
-# Install dependencies
-pip install pandas numpy matplotlib seaborn openpyxl pyyaml
+pip install -r requirements.txt
 ```
 
-## Quick Start
+Requires Python 3.10+.
+
+## Usage
+
+### GUI (recommended)
 
 ```bash
-# Run complete pipeline with default config
-python run_pipeline.py
-
-# Run with custom config
-python run_pipeline.py --config my_config.yaml
-
-# Run only specific conditions
-python run_pipeline.py --conditions MIAT_OE_vs_Control,QKI_KO_vs_WT
-
-# Run only DESeq2 analysis, skip splicing
-python run_pipeline.py --modules deseq2
-
-# Quick filtering check without regenerating figures
-python run_pipeline.py --skip-figures
+python pipeline_launcher.py
 ```
 
-## Configuration
+The launcher provides tabbed configuration for:
+- **Conditions**: Add DESeq2 files and rMATS directories per condition
+- **Thresholds**: padj, log2FC, baseMean, FDR, dPSI cutoffs
+- **Output**: Directory, figure format/DPI, colors
+- **Enrichment**: GSEA/ORA database selection, species, genes of interest
+- **Columns**: Custom column name mapping for non-standard input files
 
-Edit `rnaseq_config.yaml` to customize:
-- Input file paths
-- Filtering thresholds (log2FC, padj, baseMean, dPSI)
-- Conditions to analyze
-- Figure settings (DPI, format, which figures to generate)
-- Analysis modules to run
+### Programmatic
 
-## Project Structure
+```python
+import deseq2_rmats_filter_pipeline as pipeline
 
+config = {
+    "CONDITIONS": [
+        {"name": "Treatment_vs_Control", "label": "Treatment vs Control",
+         "deseq2_file": "/path/to/deseq2.xlsx", "rmats_dir": "/path/to/rmats/"},
+    ],
+    "OUTPUT_DIR": "/path/to/output",
+    "LOG2FC_CUTOFF": 0.4,
+    "BASEMEAN_CUTOFF": 20,
+    "PADJ_CUTOFF": 0.01,
+    "RMATS_FDR_CUTOFF": 0.01,
+    "INCLEVEL_DIFF_CUTOFF": 0.1,
+    "USE_FDR": True,
+}
+
+pipeline.run_pipeline(config)
 ```
-RNA-seq_MIAT_OE_KCN_QKI-KO/
-├── run_pipeline.py          # Single CLI entry point
-├── rnaseq_config.yaml       # All parameters
-├── modules/
-│   ├── deseq2.py            # DESeq2 differential expression
-│   ├── splicing.py          # rMATS alternative splicing
-│   ├── concordance.py       # Directional overlap analysis
-│   ├── figures.py           # Publication figures
-│   └── standardize.py       # HGNC symbol mapping, biotype annotation
-├── PIPELINE_USAGE.md        # Detailed usage guide
-└── CONSOLIDATION_ANALYSIS.md # Technical consolidation notes
-```
 
-## Output
+All config keys are optional except `CONDITIONS` and `OUTPUT_DIR`. Defaults are applied for any missing keys.
 
-The pipeline generates:
-- **Excel files**: Filtered DEGs and splicing events with gene symbols and biotypes
-- **Figures**: Volcano plots, MA plots, Venn diagrams, concordance scatters, violin plots, heatmaps
-- **Summary statistics**: DEG counts, pathway enrichment results
-- **Prism files**: CSV files compatible with GraphPad Prism for re-plotting
+## Outputs
 
-## Modules
+Per condition:
+- Volcano plots (static, labeled, interactive HTML)
+- MA plots, p-value histograms, expression rank plots
+- Biotype distribution and enrichment analysis
+- rMATS scatter plots per event type (SE, A3SS, A5SS, RI, MXE)
+- GO ORA combined dot plots (up/down, all databases)
+- GSEA combined multi-database plots + enrichment score plots
+- Excel exports (DESeq2 + rMATS filtered results)
 
-### deseq2.py
-- Load and normalize DESeq2 output
-- Apply filtering thresholds
-- Gene name lookup (MyGene → BioMart → Ensembl fallback)
-- Biotype annotation
-- Export filtered DEGs to Excel
+Cross-condition:
+- Venn diagrams (3-way + pairwise, DEG + splicing)
+- UpSet plots, direction concordance heatmaps
+- log2FC heatmap, pairwise scatter plots
+- DE vs AS overlap analysis
+- Gene overlap summary table
+- Summary statistics dashboard
 
-### splicing.py
-- Load rMATS output files (SE, A3SS, A5SS, MXE, RI)
-- Filter by dPSI, FDR, and p-value
-- Event type summaries
-- Directional analysis (included/excluded)
-- Export to Excel
+Exports:
+- GraphPad Prism .pzfx files (18+ per run)
+- PowerPoint report
+- Leading edge gene tables (GSEA)
 
-### concordance.py
-- Cross-condition DEG overlap analysis
-- Directional concordance (up/down agreement)
-- Scatter plots with Pearson correlation
-- Venn diagrams (2-way and 3-way)
-- Excel exports with concordance labels
+## Dependencies
 
-### figures.py
-- All publication-quality figure generation
-- 300 DPI resolution
-- Okabe-Ito color-blind friendly palette
-- Customizable layouts
-
-### standardize.py
-- Gene ID/name lookup functions
-- Biotype normalization
-- Column standardization
-- Data preprocessing utilities
-
-## Filtering Thresholds
-
-Default thresholds (can be customized in config):
-- **DESeq2**: log2FC ≥ 0.4, padj ≤ 0.05, baseMean ≥ 20
-- **rMATS**: |dPSI| ≥ 0.1, FDR ≤ 0.05
-
-## Citation
-
-If you use this pipeline, please cite:
-- DESeq2: Love, M.I., Huber, W., Anders, S. (2014) [Genome Biology]
-- rMATS: Shen, S. et al. (2014) [PNAS]
+See `requirements.txt`. Key packages: pandas, matplotlib, seaborn, gseapy, openpyxl, scipy, adjustText, upsetplot, mygene, plotly, python-pptx, matplotlib-venn.
 
 ## Author
 
-Brian Amburn, MD-PhD Candidate  
-University of Texas Medical Branch (UTMB)  
-Dissertation research: lncRNA MIAT and QKI protein interactions
-
-## License
-
-MIT License - see LICENSE file for details
+Brian Amburn, MD-PhD Candidate
+University of Texas Medical Branch (UTMB)

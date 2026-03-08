@@ -2,45 +2,64 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-env/
-venv/
 *.egg-info/
 dist/
 build/
+*.egg
+.venv/
+venv/
+env/
 
-# Data files
-*.xlsx
-*.csv
-*.txt
-*.tsv
-
-# Output files
+# Output directories
 pipeline_output/
-figures/
-*.png
-*.jpg
-*.jpeg
-*.pdf
+*_output/
+output/
 
-# Large files
-*.h5
-*.hdf5
+# Data files (input data lives outside repo)
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.tsv
+*.tab
+*.cls
+*.numbers
+*.docx
+*.zip
+
+# Large bioinformatics files
 *.bam
 *.sam
 *.fastq
 *.fq.gz
+*.h5
+*.hdf5
+*.bed
+*.gtf
+*.gff
 
-# IDEs
+# Generated figures
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
+*.tiff
+
+# Prism / PowerPoint exports
+*.pzfx
+*.pptx
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Logs
-*.log
-
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs and debug
+*.log
+*_debug.md
