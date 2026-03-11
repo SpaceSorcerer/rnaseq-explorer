@@ -83,9 +83,9 @@ RMATS_FILE_SUFFIX = ".MATS.JCEC.txt"  # change to ".MATS.JCEC.xlsx" if using Exc
 OUTPUT_DIR = "./output"
 
 # --- DESeq2 Cutoffs ---
-LOG2FC_CUTOFF   = 0.4      # absolute log2 fold change threshold
-BASEMEAN_CUTOFF = 20       # minimum baseMean expression (filters lowly-expressed genes)
-PADJ_CUTOFF     = 0.01     # adjusted p-value threshold
+LOG2FC_CUTOFF   = 1.0      # absolute log2 fold change threshold (HSCHARME: |log2FC| > 1)
+BASEMEAN_CUTOFF = 10       # minimum baseMean expression (HSCHARME: <10 counts in ≥2 samples)
+PADJ_CUTOFF     = 0.05     # adjusted p-value threshold (HSCHARME: padj < 0.05)
 
 # Automatic biotype splitting: runs analysis for protein_coding and non-protein_coding
 # separately in addition to all genes. Requires "biotype" column in your DESeq2 data.
@@ -98,10 +98,11 @@ GENE_NAME_LOOKUP = True
 SPECIES = "human"   # options: "human", "mouse", "rat", "zebrafish", "fly", "worm", etc.
 
 # --- rMATS Cutoffs ---
-RMATS_FDR_CUTOFF     = 0.01    # FDR threshold
-RMATS_PVAL_CUTOFF    = 0.01    # PValue threshold (used for scatter plots)
+RMATS_FDR_CUTOFF     = 0.05    # FDR threshold (HSCHARME: FDR < 0.05)
+RMATS_PVAL_CUTOFF    = 0.05    # PValue threshold (aligned with FDR)
 INCLEVEL_DIFF_CUTOFF = 0.1     # absolute IncLevelDifference threshold
 USE_FDR = True                 # True = filter by FDR, False = filter by PValue
+RMATS_DUAL_FILTER = False      # True = filter by BOTH FDR AND PValue simultaneously
 
 # --- Column Name Mapping (adjust if your column headers differ) ---
 DESEQ2_COLS = {
@@ -195,6 +196,13 @@ ORA_DATABASES = [
 
 GENES_OF_INTEREST = ["MIAT", "QKI", "QKI-5", "QKI-6", "QKI-7"]
 
+# --- RBP Annotation (optional) ---
+# Path to an RBP annotation Excel file. Supports two formats:
+#   1) RBP-E-A-C-Complex.xlsx  (columns: Gene Name, TriSNRP, B Complex, ...)
+#   2) RBP_yael_MW_lists.xlsx  (columns: Gene Symbol, Yael_RBP?, MW_RBP?)
+# Leave empty to skip RBP annotation.
+RBP_FILE = ""
+
 # --- Normalized Counts (optional, for PCA/heatmaps) ---
 COUNTS_FILE = ""              # Path to normalized_counts.tsv (genes x samples)
 SAMPLE_METADATA = {}          # {"sample_name": "condition_name", ...} or auto-detect
@@ -207,9 +215,9 @@ GSEA_MAX_SIZE = 500
 GSEA_PERMUTATIONS = 1000      # WSF uses 1000 (was 100); better p-value accuracy
 
 # --- ORA Method ---
-ORA_METHOD = "gprofiler"      # "gprofiler" (WSF ground truth, g:SCS correction)
-                              # or "enrichr" (legacy). Falls back to enrichr if
-                              # gprofiler-official not installed.
+ORA_METHOD = "both"           # "both" (run Enrichr + g:Profiler side-by-side),
+                              # "gprofiler" (g:SCS correction), or "enrichr" (legacy).
+                              # Falls back to enrichr if gprofiler-official not installed.
 
 # Event type colors for comparison charts
 EVENT_COLORS = {
@@ -243,21 +251,22 @@ def setup_style():
     sns.set_palette("deep")
 
 
-def add_count_box(ax, n_up, n_down, total, position="upper left",
+def add_count_box(ax, n_up, n_down, total, position="lower left",
                    up_label="Up", down_label="Down"):
-    """Add a text box with up/down/total counts to any axis."""
+    """Add a compact count box in a data-sparse corner of the plot."""
     text = (f"{up_label}: {n_up:,}\n"
             f"{down_label}: {n_down:,}\n"
             f"Total: {total:,}")
+    # Use lower-left by default to avoid covering significant data points
     loc = {"upper left": (0.02, 0.98), "upper right": (0.98, 0.98),
            "lower left": (0.02, 0.02), "lower right": (0.98, 0.02)}
-    x, y = loc.get(position, (0.02, 0.98))
+    x, y = loc.get(position, (0.02, 0.02))
     ha = "left" if "left" in position else "right"
     va = "top" if "upper" in position else "bottom"
-    ax.text(x, y, text, transform=ax.transAxes, fontsize=10,
+    ax.text(x, y, text, transform=ax.transAxes, fontsize=9,
             va=va, ha=ha, fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
-                      edgecolor="grey", alpha=0.85))
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="grey", alpha=0.9))
 
 
 def load_file(filepath, name="file"):
@@ -826,6 +835,83 @@ def _enrich_with_gene_names(df: "pd.DataFrame", file_label: str = "") -> "pd.Dat
     return df
 
 
+# mygene type_of_gene → Ensembl-style biotype mapping
+_MYGENE_BIOTYPE_MAP = {
+    "protein-coding": "protein_coding",
+    "ncrna": "lncrna",
+    "pseudo": "pseudogene",
+    "snrna": "snrna",
+    "snorna": "snorna",
+    "rrna": "rrna",
+    "trna": "trna",
+    "scrna": "scrna",
+    "mirna": "mirna",
+}
+
+
+def _reassign_biotypes_from_mygene(df, file_label=""):
+    """Re-assign biotype_group when all values are 'Other' using mygene type_of_gene.
+
+    Queries MyGene.info for gene type and maps results through _BIOTYPE_GROUPS.
+    Only runs when the biotype column exists and has no meaningful values.
+    """
+    bio_col = DESEQ2_COLS.get("biotype", "")
+    id_col = DESEQ2_COLS.get("gene_id", "")
+    if not bio_col or bio_col not in df.columns or not id_col or id_col not in df.columns:
+        return df
+
+    unique_biotypes = set(df[bio_col].dropna().str.strip().unique())
+    if unique_biotypes - {"Other", "other", ""}:
+        return df  # has real biotype values, no re-assignment needed
+
+    print(f"  [INFO] All biotypes are 'Other' in {file_label} — fetching from MyGene.info...")
+    all_ids = df[id_col].dropna().astype(str).unique().tolist()
+    ens_ids = [i for i in all_ids if i.upper().startswith("ENS")]
+    if not ens_ids:
+        return df
+
+    # Fetch type_of_gene from mygene in batches
+    type_map = {}
+    batch_size = 1000
+    url = "https://mygene.info/v3/query"
+    for start in range(0, len(ens_ids), batch_size):
+        batch = ens_ids[start:start + batch_size]
+        payload = urllib.parse.urlencode({
+            "q": ",".join(batch),
+            "scopes": "ensembl.gene",
+            "fields": "type_of_gene",
+            "species": SPECIES,
+        }).encode()
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+                hits = data if isinstance(data, list) else data.get("hits", [])
+            for hit in hits:
+                if "type_of_gene" in hit and "query" in hit:
+                    type_map[hit["query"]] = hit["type_of_gene"]
+        except Exception as exc:
+            print(f"  WARNING: MyGene.info biotype lookup failed: {exc}")
+
+    if not type_map:
+        return df
+
+    # Map mygene types → Ensembl-style biotypes → biotype groups
+    df = df.copy()
+    def _resolve(gene_id):
+        raw = type_map.get(str(gene_id), "")
+        ensembl_bt = _MYGENE_BIOTYPE_MAP.get(raw.lower(), raw.lower())
+        return _BIOTYPE_GROUPS.get(ensembl_bt, "Other")
+
+    df[bio_col] = df[id_col].map(_resolve)
+    resolved = (df[bio_col] != "Other").sum()
+    print(f"  Resolved {resolved:,} / {len(df):,} gene biotypes via MyGene.info")
+    return df
+
+
 def validate_columns(df, required_cols, name="file"):
     """Check that expected columns exist."""
     missing = [c for c in required_cols if c and c not in df.columns]
@@ -932,6 +1018,50 @@ def _resolve_column(df, col_key, configured_name, alias_map, file_label="file"):
             return found
 
     return None
+
+
+def _validate_rmats_columns(df, col_mapping):
+    """Validate that required rMATS columns exist, trying common aliases.
+
+    For each required column from *col_mapping* (a dict like RMATS_COLS),
+    check if it exists in the DataFrame.  If not, try known aliases in
+    order; if found, rename the column and print a warning.  If no alias
+    is found, raise ``ValueError`` with available columns listed.
+
+    Returns the (possibly renamed) DataFrame.
+    """
+    alias_map = {
+        "FDR": ["FDR", "fdr", "adj.P.Val", "padj", "q-value"],
+        "PValue": ["PValue", "pvalue", "P.Value", "p_value", "p-value"],
+        "IncLevelDifference": ["IncLevelDifference", "IncLevel_Difference",
+                               "dPSI", "inc_level_diff"],
+        "geneSymbol": ["geneSymbol", "GeneSymbol", "gene_symbol",
+                       "geneName", "gene_name"],
+        "GeneID": ["GeneID", "gene_id", "Ensembl_ID"],
+        "ID": ["ID", "id", "event_id"],
+    }
+    rename = {}
+    for _key, expected in col_mapping.items():
+        if not expected or expected in df.columns:
+            continue
+        # Try aliases for this expected column name
+        aliases = alias_map.get(expected, [])
+        found = False
+        for alias in aliases:
+            if alias in df.columns:
+                rename[alias] = expected
+                print(f"  [WARN] rMATS column '{alias}' mapped to '{expected}'")
+                found = True
+                break
+        if not found:
+            raise ValueError(
+                f"Required rMATS column '{expected}' not found. "
+                f"Available columns: {list(df.columns)}. "
+                f"Check your rMATS output format."
+            )
+    if rename:
+        df = df.rename(columns=rename)
+    return df
 
 
 def _normalize_gsea_cols(df):
@@ -1068,6 +1198,262 @@ def _best_gene_key(df):
     return name_col, "gene name"
 
 
+# ---------------------------------------------------------------------------
+# RBP ANNOTATION
+# ---------------------------------------------------------------------------
+
+def load_rbp_annotations(rbp_file):
+    """Load RBP annotations from an Excel file.
+
+    Supports two formats:
+      1) RBP-E-A-C-Complex.xlsx  — columns: Gene Name, TriSNRP, B Complex,
+         C Complex, U2-Ecomplex, Yael_RBP?, MW_RBP?
+      2) RBP_yael_MW_lists.xlsx  — columns: Gene Symbol, Yael_RBP?, MW_RBP?
+
+    Returns a dict mapping uppercase gene_symbol -> dict of annotations.
+    """
+    path = Path(rbp_file)
+    if not path.exists():
+        print(f"  WARNING: RBP file not found: {rbp_file}")
+        return {}
+
+    df = pd.read_excel(path, sheet_name=0)
+    print(f"  Loaded RBP annotations: {df.shape[0]:,} rows x {df.shape[1]} columns")
+
+    # Detect gene column
+    gene_col = None
+    for candidate in ["Gene Name", "Gene Symbol", "gene_name", "gene_symbol"]:
+        if candidate in df.columns:
+            gene_col = candidate
+            break
+    if gene_col is None:
+        print(f"  WARNING: Cannot find gene column in RBP file. "
+              f"Columns: {list(df.columns)}")
+        return {}
+
+    # Detect format by checking for spliceosome complex columns
+    complex_cols = {}
+    has_complexes = False
+    for raw_col, clean_key in [("TriSNRP", "TriSNRP"),
+                                ("B Complex", "B_Complex"),
+                                ("C Complex", "C_Complex"),
+                                ("U2-Ecomplex", "U2_Ecomplex")]:
+        if raw_col in df.columns:
+            complex_cols[raw_col] = clean_key
+            has_complexes = True
+
+    annotations = {}
+    for _, row in df.iterrows():
+        gene = row[gene_col]
+        if pd.isna(gene) or str(gene).strip() == "":
+            continue
+        gene_upper = str(gene).strip().upper()
+
+        entry = {
+            "is_RBP_Yael": str(row.get("Yael_RBP?", "")).strip().upper() == "Y",
+            "is_RBP_MW":   str(row.get("MW_RBP?", "")).strip().upper() == "Y",
+        }
+        if has_complexes:
+            for raw_col, clean_key in complex_cols.items():
+                entry[clean_key] = str(row.get(raw_col, "")).strip().upper() == "Y"
+
+        annotations[gene_upper] = entry
+
+    n_yael = sum(1 for v in annotations.values() if v["is_RBP_Yael"])
+    n_mw = sum(1 for v in annotations.values() if v["is_RBP_MW"])
+    print(f"  RBP annotations: {len(annotations):,} genes "
+          f"(Yael: {n_yael:,}, MW: {n_mw:,})")
+    if has_complexes:
+        print(f"  Spliceosome complex columns detected: "
+              f"{list(complex_cols.values())}")
+    return annotations
+
+
+def annotate_rbps(deg_df, rbp_annotations, gene_col="gene_name"):
+    """Add RBP annotation columns to a DEG DataFrame.
+
+    Adds: is_RBP, is_RBP_Yael, is_RBP_MW, and spliceosome complex columns
+    if available. Matching is case-insensitive.
+    """
+    if not rbp_annotations or gene_col not in deg_df.columns:
+        return deg_df
+
+    df = deg_df.copy()
+    gene_upper = df[gene_col].astype(str).str.strip().str.upper()
+
+    # Determine which annotation keys exist (from first entry)
+    sample_entry = next(iter(rbp_annotations.values()))
+    all_keys = list(sample_entry.keys())
+
+    for key in all_keys:
+        df[key] = gene_upper.map(
+            lambda g, k=key: rbp_annotations.get(g, {}).get(k, False))
+
+    # Add aggregate is_RBP column (True if either Yael or MW)
+    df["is_RBP"] = df["is_RBP_Yael"] | df["is_RBP_MW"]
+
+    # Reorder: put is_RBP right after the annotation keys
+    cols = [c for c in df.columns if c not in ["is_RBP"] + all_keys]
+    # Insert RBP columns at end, with is_RBP first
+    df = df[cols + ["is_RBP"] + all_keys]
+
+    n_rbp = int(df["is_RBP"].sum())
+    print(f"  RBP-annotated: {n_rbp:,} / {len(df):,} genes are RBPs")
+    return df
+
+
+def rbp_heatmap(condition_results, condition_labels, outdir, max_genes=80):
+    """Cross-condition heatmap of log2FC for DEGs that are annotated RBPs.
+
+    Only includes genes that are significant DEGs in at least 1 condition
+    AND are annotated as RBPs (is_RBP == True).
+    """
+    fc_col   = DESEQ2_COLS["log2fc"]
+    name_col = DESEQ2_COLS.get("gene_name", "")
+    names    = list(condition_results.keys())
+
+    if not name_col:
+        print("  RBP heatmap: no gene_name column configured, skipping")
+        return
+
+    # Collect RBP DEGs across all conditions
+    rbp_genes = set()
+    for cond_name in names:
+        filt = condition_results[cond_name]["deseq2_filtered"]["all_genes"]
+        if "is_RBP" not in filt.columns or name_col not in filt.columns:
+            continue
+        rbp_filt = filt[filt["is_RBP"] == True]
+        rbp_genes.update(rbp_filt[name_col].dropna().astype(str).str.strip().unique())
+
+    if not rbp_genes:
+        print("  RBP heatmap: no RBP DEGs found across conditions, skipping")
+        return
+
+    # Build log2FC matrix from RAW data for these genes
+    fc_dfs = []
+    for cond_name in names:
+        raw = condition_results[cond_name]["deseq2_raw"]
+        if name_col not in raw.columns or fc_col not in raw.columns:
+            continue
+        sub = raw[[name_col, fc_col]].dropna(subset=[name_col]).copy()
+        sub[name_col] = sub[name_col].astype(str).str.strip()
+        sub = sub[sub[name_col].isin(rbp_genes)]
+        sub = sub.drop_duplicates(subset=[name_col]).set_index(name_col)
+        fc_series = sub[fc_col]
+        fc_series.name = condition_labels[cond_name]
+        fc_dfs.append(fc_series)
+
+    if not fc_dfs:
+        print("  RBP heatmap: no log2FC data available, skipping")
+        return
+
+    matrix = pd.concat(fc_dfs, axis=1).dropna()
+
+    if len(matrix) == 0:
+        print("  RBP heatmap: no genes with complete log2FC data, skipping")
+        return
+
+    # Limit to top genes by max absolute FC
+    title_note = ""
+    if len(matrix) > max_genes:
+        matrix["max_abs_fc"] = matrix.abs().max(axis=1)
+        matrix = matrix.nlargest(max_genes, "max_abs_fc").drop(columns="max_abs_fc")
+        title_note = f" (top {max_genes})"
+
+    # Use blue-white-orange diverging colormap (color-blind friendly)
+    from matplotlib.colors import LinearSegmentedColormap
+    rbp_cmap = LinearSegmentedColormap.from_list(
+        "blue_white_orange", ["#0072B2", "#FFFFFF", "#E69F00"])
+
+    g = sns.clustermap(matrix, cmap=rbp_cmap, center=0,
+                       figsize=(8, max(6, len(matrix) * 0.2)),
+                       row_cluster=True, col_cluster=False,
+                       yticklabels=True, linewidths=0.3, linecolor="white")
+    g.fig.suptitle(
+        f"RBP DEG log2FC Heatmap{title_note}",
+        y=1.02, fontsize=12, fontweight="bold")
+
+    outpath = outdir / f"rbp_log2fc_heatmap.{FIG_FORMAT}"
+    g.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
+    plt.close(g.fig)
+    print(f"  Saved: {outpath} ({len(matrix)} RBP genes)")
+
+
+def rbp_summary_table(condition_results, condition_labels, outdir):
+    """Export an Excel table of all DEG RBPs across conditions.
+
+    One row per gene with columns for each condition's log2FC and padj,
+    plus RBP category columns (Yael, MW, spliceosome complexes).
+    """
+    fc_col   = DESEQ2_COLS["log2fc"]
+    padj_col = DESEQ2_COLS["padj"]
+    name_col = DESEQ2_COLS.get("gene_name", "")
+    names    = list(condition_results.keys())
+
+    if not name_col:
+        print("  RBP summary: no gene_name column configured, skipping")
+        return
+
+    # Collect all RBP DEGs and their annotation info
+    all_rbp_info = {}   # gene -> annotation dict
+    gene_data = {}      # gene -> {condition: {log2fc, padj}}
+
+    for cond_name in names:
+        filt = condition_results[cond_name]["deseq2_filtered"]["all_genes"]
+        if "is_RBP" not in filt.columns or name_col not in filt.columns:
+            continue
+        rbp_rows = filt[filt["is_RBP"] == True]
+        for _, row in rbp_rows.iterrows():
+            gene = str(row[name_col]).strip()
+            if not gene or gene == "nan":
+                continue
+            if gene not in gene_data:
+                gene_data[gene] = {}
+            gene_data[gene][cond_name] = {
+                "log2FC": row.get(fc_col, np.nan),
+                "padj":   row.get(padj_col, np.nan),
+            }
+
+            # Capture RBP annotation columns from the first occurrence
+            if gene not in all_rbp_info:
+                info = {}
+                for col in ["is_RBP_Yael", "is_RBP_MW"]:
+                    if col in filt.columns:
+                        info[col] = row.get(col, False)
+                for col in ["TriSNRP", "B_Complex", "C_Complex", "U2_Ecomplex"]:
+                    if col in filt.columns:
+                        info[col] = row.get(col, False)
+                all_rbp_info[gene] = info
+
+    if not gene_data:
+        print("  RBP summary: no RBP DEGs found, skipping")
+        return
+
+    # Build output DataFrame
+    rows = []
+    for gene in sorted(gene_data.keys()):
+        row = {"Gene": gene}
+        # Add per-condition log2FC and padj
+        for cond_name in names:
+            label = condition_labels[cond_name]
+            if cond_name in gene_data[gene]:
+                row[f"log2FC ({label})"] = gene_data[gene][cond_name]["log2FC"]
+                row[f"padj ({label})"]   = gene_data[gene][cond_name]["padj"]
+            else:
+                row[f"log2FC ({label})"] = np.nan
+                row[f"padj ({label})"]   = np.nan
+        # Add RBP annotation columns
+        info = all_rbp_info.get(gene, {})
+        for k, v in info.items():
+            row[k] = v
+        rows.append(row)
+
+    summary_df = pd.DataFrame(rows)
+    outpath = outdir / "rbp_summary.xlsx"
+    summary_df.to_excel(outpath, index=False)
+    print(f"  Saved: {outpath} ({len(summary_df)} RBP DEGs)")
+
+
 def normalize_rmats_columns(df, file_label="rMATS file"):
     """Rename df columns so they match the names in RMATS_COLS, then strip
     Ensembl version numbers from the gene_id column (GeneID).
@@ -1114,10 +1500,14 @@ def filter_deseq2(df, biotype_filter=None, label="All"):
               f"normal DESeq2 behaviour for low-count/outlier genes)")
 
     # Subset by biotype first (affects both the "all" and "filtered" returns)
-    if biotype_filter == "protein_coding":
-        df = df[df[cols["biotype"]] == "protein_coding"]
-    elif biotype_filter == "non_protein_coding":
-        df = df[df[cols["biotype"]] != "protein_coding"]
+    # Normalize for comparison: handles both raw Ensembl ("protein_coding") and
+    # pre-grouped values ("Protein Coding") from prior pipeline runs.
+    if biotype_filter in ("protein_coding", "non_protein_coding"):
+        _bio_norm = df[cols["biotype"]].fillna("").str.lower().str.replace(" ", "_")
+        if biotype_filter == "protein_coding":
+            df = df[_bio_norm == "protein_coding"]
+        else:
+            df = df[_bio_norm != "protein_coding"]
 
     # Apply significance cutoffs
     mask = (
@@ -1150,10 +1540,11 @@ def volcano_plot(df, outdir, label="All", suffix=""):
     data = df.dropna(subset=[cols["padj"], cols["log2fc"]]).copy()
     data["-log10padj"] = -np.log10(data[cols["padj"]].clip(lower=1e-300))
 
-    # Classify points
+    # Classify points — include baseMean filter to match actual DEG counts
+    basemean_ok = (data[cols["basemean"]] >= BASEMEAN_CUTOFF) if cols["basemean"] in data.columns else True
     conditions = [
-        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] >= LOG2FC_CUTOFF),
-        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] <= -LOG2FC_CUTOFF),
+        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] >= LOG2FC_CUTOFF) & basemean_ok,
+        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] <= -LOG2FC_CUTOFF) & basemean_ok,
     ]
     choices = ["Up", "Down"]
     data["status"] = np.select(conditions, choices, default="NS")
@@ -1164,10 +1555,11 @@ def volcano_plot(df, outdir, label="All", suffix=""):
 
     for status in ["NS", "Down", "Up"]:
         subset = data[data["status"] == status]
+        lbl = "NS" if status == "NS" else f"{status} ({len(subset):,})"
         ax.scatter(
             subset[cols["log2fc"]], subset["-log10padj"],
             c=color_map[status], s=8, alpha=0.5, edgecolors="none",
-            label=f"{status} ({len(subset):,})", rasterized=True
+            label=lbl, rasterized=True
         )
 
     ax.axhline(-np.log10(PADJ_CUTOFF), color="grey", ls="--", lw=0.8)
@@ -1176,16 +1568,16 @@ def volcano_plot(df, outdir, label="All", suffix=""):
 
     n_up = (data["status"] == "Up").sum()
     n_down = (data["status"] == "Down").sum()
-    add_count_box(ax, n_up, n_down, n_up + n_down, position="upper left")
+    add_count_box(ax, n_up, n_down, n_up + n_down, position="lower left")
 
     ax.set_xlabel("log$_2$ Fold Change")
     ax.set_ylabel("-log$_{10}$ (adjusted p-value)")
     ax.set_title(f"Volcano Plot - DESeq2 ({label})")
-    ax.legend(loc="upper right", frameon=True, fontsize=10, markerscale=2)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, fontsize=10, markerscale=2)
 
     fname = f"volcano_plot{suffix}.{FIG_FORMAT}"
     outpath = outdir / fname
-    fig.savefig(outpath, format=FIG_FORMAT)
+    fig.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -1195,7 +1587,8 @@ def ma_plot(df, outdir, label="All", suffix=""):
     cols = DESEQ2_COLS
     data = df.dropna(subset=[cols["padj"], cols["log2fc"], cols["basemean"]]).copy()
 
-    sig = (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]].abs() >= LOG2FC_CUTOFF)
+    basemean_ok = data[cols["basemean"]] >= BASEMEAN_CUTOFF
+    sig = (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]].abs() >= LOG2FC_CUTOFF) & basemean_ok
     data["significant"] = np.where(
         sig & (data[cols["log2fc"]] > 0), "Up",
         np.where(sig & (data[cols["log2fc"]] < 0), "Down", "NS")
@@ -1207,11 +1600,12 @@ def ma_plot(df, outdir, label="All", suffix=""):
 
     for status in ["NS", "Down", "Up"]:
         subset = data[data["significant"] == status]
+        lbl = "NS" if status == "NS" else f"{status} ({len(subset):,})"
         ax.scatter(
             np.log10(subset[cols["basemean"]].clip(lower=0.1)),
             subset[cols["log2fc"]],
             c=color_map[status], s=8, alpha=0.5, edgecolors="none",
-            label=f"{status} ({len(subset):,})", rasterized=True
+            label=lbl, rasterized=True
         )
 
     ax.axhline(0, color="black", lw=0.8)
@@ -1220,16 +1614,16 @@ def ma_plot(df, outdir, label="All", suffix=""):
 
     n_up = (data["significant"] == "Up").sum()
     n_down = (data["significant"] == "Down").sum()
-    add_count_box(ax, n_up, n_down, n_up + n_down, position="upper left")
+    add_count_box(ax, n_up, n_down, n_up + n_down, position="lower left")
 
     ax.set_xlabel("log$_{10}$ (baseMean)")
     ax.set_ylabel("log$_2$ Fold Change")
     ax.set_title(f"MA Plot - DESeq2 ({label})")
-    ax.legend(loc="upper right", frameon=True, fontsize=10, markerscale=2)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, fontsize=10, markerscale=2)
 
     fname = f"ma_plot{suffix}.{FIG_FORMAT}"
     outpath = outdir / fname
-    fig.savefig(outpath, format=FIG_FORMAT)
+    fig.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -1242,9 +1636,10 @@ def volcano_plot_interactive(df, outdir, label="All", suffix=""):
     data = df.dropna(subset=[cols["padj"], cols["log2fc"]]).copy()
     data["-log10padj"] = -np.log10(data[cols["padj"]].clip(lower=1e-300))
 
+    basemean_ok = (data[cols["basemean"]] >= BASEMEAN_CUTOFF) if cols["basemean"] in data.columns else True
     conditions = [
-        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] >= LOG2FC_CUTOFF),
-        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] <= -LOG2FC_CUTOFF),
+        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] >= LOG2FC_CUTOFF) & basemean_ok,
+        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] <= -LOG2FC_CUTOFF) & basemean_ok,
     ]
     data["Status"] = np.select(conditions, ["Up", "Down"], default="NS")
 
@@ -1304,7 +1699,8 @@ def ma_plot_interactive(df, outdir, label="All", suffix=""):
     data = df.dropna(subset=[cols["padj"], cols["log2fc"], cols["basemean"]]).copy()
     data["log10_basemean"] = np.log10(data[cols["basemean"]].clip(lower=0.1))
 
-    sig = (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]].abs() >= LOG2FC_CUTOFF)
+    basemean_ok = data[cols["basemean"]] >= BASEMEAN_CUTOFF
+    sig = (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]].abs() >= LOG2FC_CUTOFF) & basemean_ok
     data["Status"] = np.where(
         sig & (data[cols["log2fc"]] > 0), "Up",
         np.where(sig & (data[cols["log2fc"]] < 0), "Down", "NS"),
@@ -1572,7 +1968,8 @@ def biotype_volcano(all_df, outdir, label="All", suffix=""):
     df = all_df.copy().dropna(subset=[cols["log2fc"], cols["padj"]])
     df["_group"] = _assign_biotype_group(df[cols["biotype"]])
     df["_neg_log10p"] = -np.log10(df[cols["padj"]].clip(lower=1e-300))
-    df["_sig"] = (df[cols["padj"]] < PADJ_CUTOFF) & (df[cols["log2fc"]].abs() >= LOG2FC_CUTOFF)
+    _bm_ok = (df[cols["basemean"]] >= BASEMEAN_CUTOFF) if cols["basemean"] in df.columns else True
+    df["_sig"] = (df[cols["padj"]] < PADJ_CUTOFF) & (df[cols["log2fc"]].abs() >= LOG2FC_CUTOFF) & _bm_ok
 
     fig, ax = plt.subplots(figsize=(9, 7))
 
@@ -1819,6 +2216,22 @@ def load_all_rmats(rmats_dir):
         df = normalize_rmats_columns(df, f"rMATS {event_type}")
         required = [v for v in RMATS_COLS.values() if v is not None]
         validate_columns(df, required, name=f"rMATS {event_type}")
+
+        # Log which critical columns were found
+        critical = ["FDR", "PValue", "IncLevelDifference", "geneSymbol"]
+        status_parts = [f"{c} \u2713" if c in df.columns else f"{c} \u2717"
+                        for c in critical]
+        print(f"  [INFO] {event_type} columns: {', '.join(status_parts)}")
+
+        # Fill missing geneSymbol with GeneID (Ensembl ID)
+        gene_col = RMATS_COLS["gene_name"]   # "geneSymbol"
+        id_col = RMATS_COLS["gene_id"]       # "GeneID"
+        if gene_col in df.columns and id_col in df.columns:
+            mask = df[gene_col].isna() | (df[gene_col].str.strip() == "")
+            if mask.any():
+                df.loc[mask, gene_col] = df.loc[mask, id_col]
+                print(f"  [INFO] Filled {mask.sum()} missing geneSymbol values with GeneID (Ensembl ID)")
+
         df["event_type"] = event_type
         all_data[event_type] = df
 
@@ -1828,20 +2241,32 @@ def load_all_rmats(rmats_dir):
 def filter_rmats(df, event_type=""):
     """Apply rMATS cutoffs and return filtered DataFrame."""
     cols = RMATS_COLS
-    pval_col = cols["fdr"] if USE_FDR else cols["pvalue"]
-    pval_cutoff = RMATS_FDR_CUTOFF if USE_FDR else RMATS_PVAL_CUTOFF
-    pval_label = "FDR" if USE_FDR else "PValue"
+    df = _validate_rmats_columns(df, cols)
 
-    df = df.dropna(subset=[pval_col, cols["inclevel_diff"]])
-
-    mask = (
-        (df[pval_col] < pval_cutoff) &
-        (df[cols["inclevel_diff"]].abs() >= INCLEVEL_DIFF_CUTOFF)
-    )
-    filtered = df[mask].copy()
-
-    print(f"  {event_type}: {len(df):,} total -> {len(filtered):,} significant "
-          f"({pval_label} < {pval_cutoff}, |dPSI| >= {INCLEVEL_DIFF_CUTOFF})")
+    if RMATS_DUAL_FILTER:
+        # Dual filter: require BOTH FDR AND PValue thresholds
+        drop_cols = [c for c in [cols["fdr"], cols["pvalue"], cols["inclevel_diff"]] if c in df.columns]
+        df = df.dropna(subset=drop_cols)
+        mask = (
+            (df[cols["fdr"]] < RMATS_FDR_CUTOFF) &
+            (df[cols["pvalue"]] < RMATS_PVAL_CUTOFF) &
+            (df[cols["inclevel_diff"]].abs() >= INCLEVEL_DIFF_CUTOFF)
+        )
+        filtered = df[mask].copy()
+        print(f"  {event_type}: {len(df):,} total -> {len(filtered):,} significant "
+              f"(FDR < {RMATS_FDR_CUTOFF} AND PValue < {RMATS_PVAL_CUTOFF}, |dPSI| >= {INCLEVEL_DIFF_CUTOFF})")
+    else:
+        pval_col = cols["fdr"] if USE_FDR else cols["pvalue"]
+        pval_cutoff = RMATS_FDR_CUTOFF if USE_FDR else RMATS_PVAL_CUTOFF
+        pval_label = "FDR" if USE_FDR else "PValue"
+        df = df.dropna(subset=[pval_col, cols["inclevel_diff"]])
+        mask = (
+            (df[pval_col] < pval_cutoff) &
+            (df[cols["inclevel_diff"]].abs() >= INCLEVEL_DIFF_CUTOFF)
+        )
+        filtered = df[mask].copy()
+        print(f"  {event_type}: {len(df):,} total -> {len(filtered):,} significant "
+              f"({pval_label} < {pval_cutoff}, |dPSI| >= {INCLEVEL_DIFF_CUTOFF})")
 
     return df, filtered
 
@@ -1849,27 +2274,41 @@ def filter_rmats(df, event_type=""):
 def rmats_scatter(df, event_type, outdir):
     """Scatter plot: IncLevelDifference vs -log10(pvalue) for a single event type."""
     cols = RMATS_COLS
-    pval_col = cols["fdr"] if USE_FDR else cols["pvalue"]
-    pval_cutoff = RMATS_FDR_CUTOFF if USE_FDR else RMATS_PVAL_CUTOFF
-    pval_label = "FDR" if USE_FDR else "PValue"
+
+    if RMATS_DUAL_FILTER:
+        pval_col = cols["fdr"]  # plot FDR on y-axis for dual mode
+        pval_cutoff = RMATS_FDR_CUTOFF
+        pval_label = "FDR"
+    else:
+        pval_col = cols["fdr"] if USE_FDR else cols["pvalue"]
+        pval_cutoff = RMATS_FDR_CUTOFF if USE_FDR else RMATS_PVAL_CUTOFF
+        pval_label = "FDR" if USE_FDR else "PValue"
 
     data = df.dropna(subset=[pval_col, cols["inclevel_diff"]]).copy()
     data["-log10p"] = -np.log10(data[pval_col].clip(lower=1e-300))
 
-    sig = (
-        (data[pval_col] < pval_cutoff) &
-        (data[cols["inclevel_diff"]].abs() >= INCLEVEL_DIFF_CUTOFF)
-    )
+    if RMATS_DUAL_FILTER:
+        sig = (
+            (data[cols["fdr"]] < RMATS_FDR_CUTOFF) &
+            (data[cols["pvalue"]] < RMATS_PVAL_CUTOFF) &
+            (data[cols["inclevel_diff"]].abs() >= INCLEVEL_DIFF_CUTOFF)
+        )
+    else:
+        sig = (
+            (data[pval_col] < pval_cutoff) &
+            (data[cols["inclevel_diff"]].abs() >= INCLEVEL_DIFF_CUTOFF)
+        )
     data["significant"] = np.where(sig, "Significant", "NS")
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
     for status, color in [("NS", COLOR_NS), ("Significant", EVENT_COLORS.get(event_type, COLOR_UP))]:
         subset = data[data["significant"] == status]
+        lbl = "NS" if status == "NS" else f"{status} ({len(subset):,})"
         ax.scatter(
             subset[cols["inclevel_diff"]], subset["-log10p"],
             c=color, s=10, alpha=0.5, edgecolors="none",
-            label=f"{status} ({len(subset):,})", rasterized=True
+            label=lbl, rasterized=True
         )
 
     ax.axhline(-np.log10(pval_cutoff), color="grey", ls="--", lw=0.8)
@@ -1877,19 +2316,19 @@ def rmats_scatter(df, event_type, outdir):
     ax.axvline(-INCLEVEL_DIFF_CUTOFF, color="grey", ls="--", lw=0.8)
 
     sig_data = data[data["significant"] == "Significant"]
-    n_inc = (sig_data[cols["inclevel_diff"]] > 0).sum()
-    n_exc = (sig_data[cols["inclevel_diff"]] < 0).sum()
-    add_count_box(ax, n_inc, n_exc, n_inc + n_exc, position="upper left",
-                  up_label="Included", down_label="Excluded")
+    n_inc = (sig_data[cols["inclevel_diff"]] >= INCLEVEL_DIFF_CUTOFF).sum()
+    n_exc = (sig_data[cols["inclevel_diff"]] <= -INCLEVEL_DIFF_CUTOFF).sum()
+    add_count_box(ax, n_inc, n_exc, n_inc + n_exc, position="lower left",
+                  up_label=f"Included (dPSI\u22650.1)", down_label=f"Excluded (dPSI\u2264\u22120.1)")
 
     ax.set_xlabel("$\\Delta$PSI (IncLevelDifference)")
     ax.set_ylabel(f"-log$_{{10}}$ ({pval_label})")
     ax.set_title(f"rMATS - {event_type} (Skipped Exon)" if event_type == "SE"
                  else f"rMATS - {event_type}")
-    ax.legend(loc="upper right", frameon=True, fontsize=10, markerscale=2)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, fontsize=10, markerscale=2)
 
     outpath = outdir / f"rmats_{event_type}_scatter.{FIG_FORMAT}"
-    fig.savefig(outpath, format=FIG_FORMAT)
+    fig.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -1939,26 +2378,26 @@ def rmats_combined_volcano(all_data, outdir):
         d = df.dropna(subset=[pval_col, cols["inclevel_diff"]])
         s = (d[pval_col] < pval_cutoff) & (d[cols["inclevel_diff"]].abs() >= INCLEVEL_DIFF_CUTOFF)
         sig_d = d[s]
-        n_inc = int((sig_d[cols["inclevel_diff"]] > 0).sum())
-        n_exc = int((sig_d[cols["inclevel_diff"]] < 0).sum())
+        n_inc = int((sig_d[cols["inclevel_diff"]] >= INCLEVEL_DIFF_CUTOFF).sum())
+        n_exc = int((sig_d[cols["inclevel_diff"]] <= -INCLEVEL_DIFF_CUTOFF).sum())
         grand_inc += n_inc
         grand_exc += n_exc
         lines.append(f"{et}: {n_inc:,} inc / {n_exc:,} exc")
     lines.append(f"Total: {grand_inc + grand_exc:,} ({grand_inc:,} inc / {grand_exc:,} exc)")
     box_text = "\n".join(lines)
-    ax.text(0.02, 0.98, box_text, transform=ax.transAxes, fontsize=9,
-            va="top", ha="left", fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
-                      edgecolor="grey", alpha=0.85))
+    ax.text(0.02, 0.02, box_text, transform=ax.transAxes, fontsize=8,
+            va="bottom", ha="left", fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="grey", alpha=0.9))
 
     ax.set_xlabel("$\\Delta$PSI (IncLevelDifference)")
     ax.set_ylabel(f"-log$_{{10}}$ ({pval_label})")
     ax.set_title("rMATS - All Splicing Event Types")
-    ax.legend(loc="upper right", frameon=True, fontsize=10, markerscale=2,
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, fontsize=10, markerscale=2,
               title="Significant Events")
 
     outpath = outdir / f"rmats_all_events_scatter.{FIG_FORMAT}"
-    fig.savefig(outpath, format=FIG_FORMAT)
+    fig.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -2027,8 +2466,8 @@ def rmats_dpsi_distribution(all_filtered, outdir):
     y_pad = (y_max - y_min) * 0.08
     for i, et in enumerate(event_order):
         et_data = combined[combined["Event Type"] == et]["dPSI"]
-        n_inc = int((et_data > 0).sum())
-        n_exc = int((et_data < 0).sum())
+        n_inc = int((et_data >= INCLEVEL_DIFF_CUTOFF).sum())
+        n_exc = int((et_data <= -INCLEVEL_DIFF_CUTOFF).sum())
         # Included count above the violin
         ax.text(i, y_max + y_pad, f"{n_inc} inc",
                 ha="center", va="bottom", fontsize=9, fontweight="bold",
@@ -2087,7 +2526,7 @@ def deseq2_venn_diagrams(gene_sets, condition_labels, outdir):
     labels = [condition_labels[n] for n in names]
 
     for set_key, title_suffix, filename in [
-        ("all_sig", "All Significant DE Genes", "venn_all_sig_genes"),
+        ("all_sig", "Significant in Either Condition", "venn_all_sig_genes"),
         ("up", "Upregulated Genes", "venn_upregulated"),
         ("down", "Downregulated Genes", "venn_downregulated"),
     ]:
@@ -2311,43 +2750,59 @@ def deseq2_log2fc_heatmap(condition_results, condition_labels, outdir,
     return matrix
 
 
-def rmats_cross_condition_venn(condition_results, condition_labels, outdir):
-    """Venn diagrams for significant splicing genes across rMATS conditions."""
+def rmats_cross_condition_venn(condition_results, condition_labels, outdir,
+                               match_by="event"):
+    """Venn diagrams for significant splicing events across conditions.
+
+    Parameters
+    ----------
+    match_by : str
+        ``"event"`` (default) matches by genomic coordinates via
+        ``_make_event_key()``.  ``"gene"`` matches by the ``geneSymbol``
+        column so that any gene with *any* significant splicing event in a
+        condition is counted once.
+    """
     names = list(condition_results.keys())
     labels = [condition_labels[n] for n in names]
     gene_col = RMATS_COLS["gene_name"]
+    id_col   = RMATS_COLS["gene_id"]
 
-    # --- Gene-level Venn (all event types combined) ---
-    gene_sets = []
+    is_gene = match_by == "gene"
+    level_label = "gene-level" if is_gene else "coordinate-level"
+    fname_suffix = "_genelevel" if is_gene else ""
+
+    # Event-level outputs go into a subfolder
+    outdir = Path(outdir)
+    if not is_gene:
+        outdir = outdir / "event_level"
+        outdir.mkdir(exist_ok=True, parents=True)
+
+    # --- Venn (all event types combined) ---
+    event_sets = []
     for name in names:
-        all_sig_genes = set()
+        all_sig = set()
         for et, filt_df in condition_results[name]["rmats_filtered"].items():
-            all_sig_genes.update(filt_df[gene_col].dropna().unique())
-        gene_sets.append(all_sig_genes)
+            if is_gene:
+                # Match by GeneID; fall back to geneSymbol
+                _match_col = id_col if id_col in filt_df.columns else gene_col
+                if _match_col in filt_df.columns:
+                    all_sig.update(filt_df[_match_col].dropna().unique())
+            else:
+                keys = _make_event_key(filt_df, et)
+                all_sig.update(keys[keys != ""].unique())
+        event_sets.append(all_sig)
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    if len(gene_sets) == 2:
-        v = venn2(gene_sets, set_labels=labels, ax=ax)
-        if v:
-            for rid, col in [('10','#0072B2'),('01','#E69F00'),('11','#009E73')]:
-                patch = v.get_patch_by_id(rid)
-                if patch:
-                    patch.set_color(col)
-                    patch.set_alpha(0.6)
-    elif len(gene_sets) == 3:
-        v = venn3(gene_sets, set_labels=labels, ax=ax)
-        if v:
-            for rid, col in [('100','#0072B2'),('010','#E69F00'),('001','#56B4E9'),
-                             ('110','#009E73'),('101','#CC79A7'),('011','#F0E442'),
-                             ('111','#D55E00')]:
-                patch = v.get_patch_by_id(rid)
-                if patch:
-                    patch.set_color(col)
-                    patch.set_alpha(0.6)
-    ax.set_title("rMATS - Genes with Significant Splicing Events",
+    if len(event_sets) == 2:
+        v = venn2(event_sets, set_labels=labels, ax=ax)
+        _style_venn(v, 2)
+    elif len(event_sets) == 3:
+        v = venn3(event_sets, set_labels=labels, ax=ax)
+        _style_venn(v, 3)
+    ax.set_title(f"rMATS \u2014 Significant Splicing Events ({level_label})",
                  fontsize=13, fontweight="bold")
-    outpath = outdir / f"venn_rmats_genes.{FIG_FORMAT}"
-    fig.savefig(outpath, format=FIG_FORMAT)
+    outpath = Path(outdir) / f"venn_rmats_events{fname_suffix}.{FIG_FORMAT}"
+    fig.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -2362,36 +2817,31 @@ def rmats_cross_condition_venn(condition_results, condition_labels, outdir):
         sets = []
         for name in names:
             if et in condition_results[name]["rmats_filtered"]:
-                genes = set(condition_results[name]["rmats_filtered"][et][gene_col].dropna().unique())
+                filt_df = condition_results[name]["rmats_filtered"][et]
+                if is_gene:
+                    # Match by GeneID; fall back to geneSymbol
+                    _match_col = id_col if id_col in filt_df.columns else gene_col
+                    items = set(filt_df[_match_col].dropna().unique()) if _match_col in filt_df.columns else set()
+                else:
+                    keys = _make_event_key(filt_df, et)
+                    items = set(keys[keys != ""].unique())
             else:
-                genes = set()
-            sets.append(genes)
+                items = set()
+            sets.append(items)
 
         if len(sets) == 2:
             v = venn2(sets, set_labels=labels, ax=ax)
-            if v:
-                for rid, col in [('10','#0072B2'),('01','#E69F00'),('11','#009E73')]:
-                    patch = v.get_patch_by_id(rid)
-                    if patch:
-                        patch.set_color(col)
-                        patch.set_alpha(0.6)
+            _style_venn(v, 2)
         elif len(sets) == 3:
             v = venn3(sets, set_labels=labels, ax=ax)
-            if v:
-                for rid, col in [('100','#0072B2'),('010','#E69F00'),('001','#56B4E9'),
-                                 ('110','#009E73'),('101','#CC79A7'),('011','#F0E442'),
-                                 ('111','#D55E00')]:
-                    patch = v.get_patch_by_id(rid)
-                    if patch:
-                        patch.set_color(col)
-                        patch.set_alpha(0.6)
+            _style_venn(v, 3)
         ax.set_title(f"{et}", fontsize=12, fontweight="bold")
 
-    fig.suptitle("rMATS - Splicing Gene Overlap by Event Type",
+    fig.suptitle(f"rMATS \u2014 Splicing Event Overlap by Type ({level_label})",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
-    outpath = outdir / f"venn_rmats_events_by_type.{FIG_FORMAT}"
-    fig.savefig(outpath, format=FIG_FORMAT)
+    outpath = Path(outdir) / f"venn_rmats_events_by_type{fname_suffix}.{FIG_FORMAT}"
+    fig.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -2471,6 +2921,53 @@ def rmats_direction_concordance(condition_results, condition_labels, outdir):
     return conc_df
 
 
+# Coordinate columns that uniquely identify each splicing event
+_COORD_COLS = {
+    "SE": ["chr", "strand", "exonStart_0base", "exonEnd",
+            "upstreamES", "upstreamEE", "downstreamES", "downstreamEE"],
+    "A3SS": ["chr", "strand", "longExonStart_0base", "longExonEnd",
+             "shortES", "shortEE", "flankingES", "flankingEE"],
+    "A5SS": ["chr", "strand", "longExonStart_0base", "longExonEnd",
+             "shortES", "shortEE", "flankingES", "flankingEE"],
+    "RI": ["chr", "strand", "riExonStart_0base", "riExonEnd",
+            "upstreamES", "upstreamEE", "downstreamES", "downstreamEE"],
+    "MXE": ["chr", "strand", "1stExonStart_0base", "1stExonEnd",
+            "2ndExonStart_0base", "2ndExonEnd",
+            "upstreamES", "upstreamEE", "downstreamES", "downstreamEE"],
+}
+
+
+def _make_event_key(df, event_type):
+    """Create a unique event key from genomic coordinate columns.
+
+    Returns a pandas Series of strings in the format
+    ``chr:strand:col1:col2:...`` for each row in *df*.  If any required
+    coordinate column is missing, an empty string is returned for every
+    row so callers can filter gracefully.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        rMATS filtered or raw DataFrame for a single event type.
+    event_type : str
+        One of ``RMATS_EVENT_TYPES`` (SE, A3SS, A5SS, RI, MXE).
+    """
+    coord_cols = _COORD_COLS.get(event_type, [])
+    if not coord_cols:
+        return pd.Series([""] * len(df), index=df.index)
+
+    # Check that all required columns are present
+    missing = [c for c in coord_cols if c not in df.columns]
+    if missing:
+        return pd.Series([""] * len(df), index=df.index)
+
+    # Build key by concatenating coordinate values with ':' separator
+    key = df[coord_cols[0]].astype(str)
+    for col in coord_cols[1:]:
+        key = key + ":" + df[col].astype(str)
+    return key
+
+
 def _style_venn(v, n_sets):
     """Apply Okabe-Ito colors to a matplotlib_venn Venn diagram object."""
     if v is None:
@@ -2491,59 +2988,88 @@ def _style_venn(v, n_sets):
                 patch.set_alpha(0.6)
 
 
-def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir):
-    """Generate 4-panel directional Venn diagrams for splicing events by event type.
+def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir,
+                                    match_by="event"):
+    """4-panel directional Venn diagrams for splicing events by event type.
 
-    Panels: A. All Events, B. Concordant Increased, C. Concordant Decreased, D. Discordant
-    Validates that All = Concordant_Up + Concordant_Down + Discordant.
+    Panels: A. All Events, B. Concordant Included, C. Concordant Excluded, D. Discordant
+
+    Parameters
+    ----------
+    match_by : str
+        ``"event"`` (default) matches by genomic coordinates via
+        ``_make_event_key()``.  ``"gene"`` matches by the ``geneSymbol``
+        column, using mean dPSI per gene for direction classification.
     """
     names = list(condition_results.keys())
     labels = [condition_labels[n] for n in names]
-    gene_col = RMATS_COLS["gene_name"]
     dpsi_col = RMATS_COLS["inclevel_diff"]
+    gene_col = RMATS_COLS["gene_name"]
+
+    is_gene = match_by == "gene"
+    level_label = "gene-level" if is_gene else "coordinate-level"
+    fname_suffix = "_genelevel" if is_gene else ""
+
+    # Event-level outputs go into a subfolder
+    outdir = Path(outdir)
+    if not is_gene:
+        outdir = outdir / "event_level"
+        outdir.mkdir(exist_ok=True, parents=True)
 
     if len(names) < 2:
         print("  Directional Venn diagrams require at least 2 conditions")
         return
 
     for et in RMATS_EVENT_TYPES:
-        # Collect mean dPSI per gene for this event type
+        # Collect dPSI per item for this event type
         dfs = {}
         for name in names:
             if et in condition_results[name]["rmats_filtered"]:
                 df = condition_results[name]["rmats_filtered"][et]
                 if len(df) > 0:
-                    gene_dpsi = df.groupby(gene_col)[dpsi_col].mean()
-                    dfs[name] = gene_dpsi
+                    if is_gene:
+                        if gene_col in df.columns and dpsi_col in df.columns:
+                            item_dpsi = df.groupby(gene_col)[dpsi_col].mean()
+                            item_dpsi = item_dpsi[item_dpsi.index.notna()]
+                            if len(item_dpsi) > 0:
+                                dfs[name] = item_dpsi
+                    else:
+                        df = df.copy()
+                        df["_ekey"] = _make_event_key(df, et).values
+                        df = df[df["_ekey"] != ""]
+                        if len(df) > 0:
+                            # Use mean dPSI when multiple rows share the same event key
+                            event_dpsi = df.groupby("_ekey")[dpsi_col].mean()
+                            dfs[name] = event_dpsi
 
         if len(dfs) < 2:
             print(f"  Skipping {et} directional Venn (insufficient conditions)")
             continue
 
-        # Identify all genes per condition
-        all_genes_per_cond = {n: set(d.index) for n, d in dfs.items()}
+        # Identify all items per condition
+        all_events_per_cond = {n: set(d.index) for n, d in dfs.items()}
 
-        # Find shared genes and classify by direction
-        shared_genes = set.intersection(*all_genes_per_cond.values())
+        # Find shared items and classify by direction
+        shared_events = set.intersection(*all_events_per_cond.values())
 
         concordant_up = set()
         concordant_down = set()
         discordant = set()
 
-        for gene in shared_genes:
-            signs = [np.sign(dfs[name][gene]) for name in names]
+        for ekey in shared_events:
+            signs = [np.sign(dfs[name][ekey]) for name in names]
             if all(s > 0 for s in signs):
-                concordant_up.add(gene)
+                concordant_up.add(ekey)
             elif all(s < 0 for s in signs):
-                concordant_down.add(gene)
+                concordant_down.add(ekey)
             else:
-                discordant.add(gene)
+                discordant.add(ekey)
 
         # Validation
         computed_all = len(concordant_up) + len(concordant_down) + len(discordant)
-        if computed_all != len(shared_genes):
+        if computed_all != len(shared_events):
             print(f"  WARNING: Venn math mismatch for {et}: "
-                  f"shared={len(shared_genes)} but sum={computed_all}")
+                  f"shared={len(shared_events)} but sum={computed_all}")
 
         # Create 4-panel figure
         fig, axes = plt.subplots(2, 2, figsize=(14, 12))
@@ -2552,24 +3078,27 @@ def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir)
         # Panel A: All Events
         ax = axes[0]
         if len(names) == 2:
-            v = venn2(list(all_genes_per_cond.values()), set_labels=labels, ax=ax)
+            v = venn2(list(all_events_per_cond.values()), set_labels=labels, ax=ax)
             _style_venn(v, 2)
         elif len(names) == 3:
-            v = venn3(list(all_genes_per_cond.values()), set_labels=labels, ax=ax)
+            v = venn3(list(all_events_per_cond.values()), set_labels=labels, ax=ax)
             _style_venn(v, 3)
-        ax.set_title(f"A. All Events (n={sum(len(s) for s in all_genes_per_cond.values())})",
-                     fontsize=12, fontweight="bold")
+        _sizes = " | ".join(f"{labels[i]}: {len(list(all_events_per_cond.values())[i])}"
+                             for i in range(len(labels)))
+        ax.set_title(
+            f"A. All Events ({_sizes})",
+            fontsize=12, fontweight="bold")
 
-        # Panel B: Concordant Increased
+        # Panel B: Concordant Included
         ax = axes[1]
         concordant_up_per_cond = []
         for name in names:
-            genes_up = set()
+            events_up = set()
             if name in dfs:
-                for gene in concordant_up:
-                    if gene in dfs[name].index:
-                        genes_up.add(gene)
-            concordant_up_per_cond.append(genes_up)
+                for ekey in concordant_up:
+                    if ekey in dfs[name].index:
+                        events_up.add(ekey)
+            concordant_up_per_cond.append(events_up)
 
         if len(names) == 2:
             v = venn2(concordant_up_per_cond, set_labels=labels, ax=ax)
@@ -2577,19 +3106,19 @@ def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir)
         elif len(names) == 3:
             v = venn3(concordant_up_per_cond, set_labels=labels, ax=ax)
             _style_venn(v, 3)
-        ax.set_title(f"B. Concordant Increased (n={len(concordant_up)})",
+        ax.set_title(f"B. Concordant Included (n={len(concordant_up)})",
                      fontsize=12, fontweight="bold")
 
-        # Panel C: Concordant Decreased
+        # Panel C: Concordant Excluded
         ax = axes[2]
         concordant_down_per_cond = []
         for name in names:
-            genes_down = set()
+            events_down = set()
             if name in dfs:
-                for gene in concordant_down:
-                    if gene in dfs[name].index:
-                        genes_down.add(gene)
-            concordant_down_per_cond.append(genes_down)
+                for ekey in concordant_down:
+                    if ekey in dfs[name].index:
+                        events_down.add(ekey)
+            concordant_down_per_cond.append(events_down)
 
         if len(names) == 2:
             v = venn2(concordant_down_per_cond, set_labels=labels, ax=ax)
@@ -2597,19 +3126,19 @@ def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir)
         elif len(names) == 3:
             v = venn3(concordant_down_per_cond, set_labels=labels, ax=ax)
             _style_venn(v, 3)
-        ax.set_title(f"C. Concordant Decreased (n={len(concordant_down)})",
+        ax.set_title(f"C. Concordant Excluded (n={len(concordant_down)})",
                      fontsize=12, fontweight="bold")
 
         # Panel D: Discordant
         ax = axes[3]
         discordant_per_cond = []
         for name in names:
-            genes_disc = set()
+            events_disc = set()
             if name in dfs:
-                for gene in discordant:
-                    if gene in dfs[name].index:
-                        genes_disc.add(gene)
-            discordant_per_cond.append(genes_disc)
+                for ekey in discordant:
+                    if ekey in dfs[name].index:
+                        events_disc.add(ekey)
+            discordant_per_cond.append(events_disc)
 
         if len(names) == 2:
             v = venn2(discordant_per_cond, set_labels=labels, ax=ax)
@@ -2620,15 +3149,15 @@ def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir)
         ax.set_title(f"D. Discordant (n={len(discordant)})",
                      fontsize=12, fontweight="bold")
 
-        fig.suptitle(f"Directional Splicing Overlap - {et} Events",
+        fig.suptitle(f"Directional Splicing Overlap \u2014 {et} Events ({level_label})",
                      fontsize=14, fontweight="bold", y=0.98)
         plt.tight_layout()
 
-        outpath = outdir / f"venn_rmats_directional_{et}.{FIG_FORMAT}"
+        outpath = Path(outdir) / f"venn_rmats_directional_{et}{fname_suffix}.{FIG_FORMAT}"
         fig.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
         plt.close(fig)
-        print(f"  Saved: {outpath} (Up={len(concordant_up)}, Down={len(concordant_down)}, "
-              f"Disc={len(discordant)}, Total={len(shared_genes)})")
+        print(f"  Saved: {outpath} (Inc={len(concordant_up)}, Exc={len(concordant_down)}, "
+              f"Disc={len(discordant)}, Total={len(shared_events)})")
 
     # --- Pairwise directional Venns (venn2) ---
     if len(names) >= 3:
@@ -2638,33 +3167,43 @@ def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir)
             pair_labels = [label_a, label_b]
 
             for et in RMATS_EVENT_TYPES:
-                # Collect mean dPSI per gene for each condition in this pair
                 pair_dfs = {}
                 for nm in (name_a, name_b):
                     if et in condition_results[nm]["rmats_filtered"]:
                         df = condition_results[nm]["rmats_filtered"][et]
                         if len(df) > 0:
-                            pair_dfs[nm] = df.groupby(gene_col)[dpsi_col].mean()
+                            if is_gene:
+                                if gene_col in df.columns and dpsi_col in df.columns:
+                                    item_dpsi = df.groupby(gene_col)[dpsi_col].mean()
+                                    item_dpsi = item_dpsi[item_dpsi.index.notna()]
+                                    if len(item_dpsi) > 0:
+                                        pair_dfs[nm] = item_dpsi
+                            else:
+                                df = df.copy()
+                                df["_ekey"] = _make_event_key(df, et).values
+                                df = df[df["_ekey"] != ""]
+                                if len(df) > 0:
+                                    pair_dfs[nm] = df.groupby("_ekey")[dpsi_col].mean()
 
                 if len(pair_dfs) < 2:
                     continue
 
-                genes_a = set(pair_dfs[name_a].index)
-                genes_b = set(pair_dfs[name_b].index)
-                shared = genes_a & genes_b
+                events_a = set(pair_dfs[name_a].index)
+                events_b = set(pair_dfs[name_b].index)
+                shared = events_a & events_b
 
                 conc_up = set()
                 conc_down = set()
                 disc = set()
-                for gene in shared:
-                    sa = np.sign(pair_dfs[name_a][gene])
-                    sb = np.sign(pair_dfs[name_b][gene])
+                for ekey in shared:
+                    sa = np.sign(pair_dfs[name_a][ekey])
+                    sb = np.sign(pair_dfs[name_b][ekey])
                     if sa > 0 and sb > 0:
-                        conc_up.add(gene)
+                        conc_up.add(ekey)
                     elif sa < 0 and sb < 0:
-                        conc_down.add(gene)
+                        conc_down.add(ekey)
                     else:
-                        disc.add(gene)
+                        disc.add(ekey)
 
                 # Validation
                 computed = len(conc_up) + len(conc_down) + len(disc)
@@ -2673,64 +3212,92 @@ def rmats_directional_venn_diagrams(condition_results, condition_labels, outdir)
                           f"{name_a} vs {name_b}: shared={len(shared)} sum={computed}")
 
                 fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-                axes = axes.flatten()
+                axes_flat = axes.flatten()
 
                 # Panel A: All Events
-                v = venn2([genes_a, genes_b], set_labels=pair_labels, ax=axes[0])
+                v = venn2([events_a, events_b], set_labels=pair_labels, ax=axes_flat[0])
                 _style_venn(v, 2)
-                axes[0].set_title(f"A. All Events (n={len(genes_a | genes_b)})",
-                                  fontsize=12, fontweight="bold")
+                axes_flat[0].set_title(
+                    f"A. All Events ({label_a}: {len(events_a)} | {label_b}: {len(events_b)})",
+                    fontsize=12, fontweight="bold")
 
-                # Panel B: Concordant Increased
-                cup_a = {g for g in conc_up if g in pair_dfs[name_a].index}
-                cup_b = {g for g in conc_up if g in pair_dfs[name_b].index}
-                v = venn2([cup_a, cup_b], set_labels=pair_labels, ax=axes[1])
+                # Panel B: Concordant Included
+                cup_a = {e for e in conc_up if e in pair_dfs[name_a].index}
+                cup_b = {e for e in conc_up if e in pair_dfs[name_b].index}
+                v = venn2([cup_a, cup_b], set_labels=pair_labels, ax=axes_flat[1])
                 _style_venn(v, 2)
-                axes[1].set_title(f"B. Concordant Increased (n={len(conc_up)})",
-                                  fontsize=12, fontweight="bold")
+                axes_flat[1].set_title(
+                    f"B. Concordant Included (n={len(conc_up)})",
+                    fontsize=12, fontweight="bold")
 
-                # Panel C: Concordant Decreased
-                cdn_a = {g for g in conc_down if g in pair_dfs[name_a].index}
-                cdn_b = {g for g in conc_down if g in pair_dfs[name_b].index}
-                v = venn2([cdn_a, cdn_b], set_labels=pair_labels, ax=axes[2])
+                # Panel C: Concordant Excluded
+                cdn_a = {e for e in conc_down if e in pair_dfs[name_a].index}
+                cdn_b = {e for e in conc_down if e in pair_dfs[name_b].index}
+                v = venn2([cdn_a, cdn_b], set_labels=pair_labels, ax=axes_flat[2])
                 _style_venn(v, 2)
-                axes[2].set_title(f"C. Concordant Decreased (n={len(conc_down)})",
-                                  fontsize=12, fontweight="bold")
+                axes_flat[2].set_title(
+                    f"C. Concordant Excluded (n={len(conc_down)})",
+                    fontsize=12, fontweight="bold")
 
                 # Panel D: Discordant
-                dsc_a = {g for g in disc if g in pair_dfs[name_a].index}
-                dsc_b = {g for g in disc if g in pair_dfs[name_b].index}
-                v = venn2([dsc_a, dsc_b], set_labels=pair_labels, ax=axes[3])
+                dsc_a = {e for e in disc if e in pair_dfs[name_a].index}
+                dsc_b = {e for e in disc if e in pair_dfs[name_b].index}
+                v = venn2([dsc_a, dsc_b], set_labels=pair_labels, ax=axes_flat[3])
                 _style_venn(v, 2)
-                axes[3].set_title(f"D. Discordant (n={len(disc)})",
-                                  fontsize=12, fontweight="bold")
+                axes_flat[3].set_title(
+                    f"D. Discordant (n={len(disc)})",
+                    fontsize=12, fontweight="bold")
 
-                fig.suptitle(f"Directional Splicing Overlap - {et} Events "
-                             f"({label_a} vs {label_b})",
-                             fontsize=14, fontweight="bold", y=0.98)
+                fig.suptitle(
+                    f"Directional Splicing \u2014 {et} \u2014 "
+                    f"{label_a} vs {label_b} ({level_label})",
+                    fontsize=13, fontweight="bold", y=0.98)
                 plt.tight_layout()
-
-                outpath = outdir / f"venn_rmats_directional_{et}_{name_a}_vs_{name_b}.{FIG_FORMAT}"
+                outpath = (Path(outdir) /
+                           f"venn_rmats_directional_{et}_{name_a}_vs_{name_b}{fname_suffix}.{FIG_FORMAT}")
                 fig.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
                 plt.close(fig)
-                print(f"  Saved: {outpath.name} (Up={len(conc_up)}, Down={len(conc_down)}, "
-                      f"Disc={len(disc)}, Total={len(shared)})")
+                print(f"  Saved: {outpath.name} (Inc={len(conc_up)}, "
+                      f"Exc={len(conc_down)}, Disc={len(disc)})")
 
 
 # ---------------------------------------------------------------------------
 # PAIRWISE VENN DIAGRAMS (Brian's preferred format)
 # ---------------------------------------------------------------------------
 
-def pairwise_splicing_venns(condition_results, condition_labels, outdir):
-    """Pairwise 3-panel Venn diagrams for splicing events.
+def pairwise_splicing_venns(condition_results, condition_labels, outdir,
+                            match_by="event"):
+    """Pairwise 5-panel Venn diagrams for splicing events.
 
-    For each pair of conditions × each event type: All Significant,
-    Increased Inclusion (dPSI > 0), Decreased Inclusion (dPSI < 0).
+    For each pair of conditions x each event type:
+        1. All Significant events
+        2. Included in both  (dPSI >= INCLEVEL_DIFF_CUTOFF)
+        3. Excluded in both  (dPSI <= -INCLEVEL_DIFF_CUTOFF)
+        4. Included in {A}, Excluded in {B}
+        5. Excluded in {A}, Included in {B}
+
+    Parameters
+    ----------
+    match_by : str
+        ``"event"`` (default) matches by genomic coordinates via
+        ``_make_event_key()``.  ``"gene"`` matches by the ``geneSymbol``
+        column; directional subsets use genes where *any* event has
+        dPSI >= cutoff (included) or dPSI <= -cutoff (excluded).
     """
     outdir = Path(outdir)
     names = list(condition_results.keys())
-    gene_col = RMATS_COLS["gene_name"]
     dpsi_col = RMATS_COLS["inclevel_diff"]
+    gene_col = RMATS_COLS["gene_name"]
+    id_col   = RMATS_COLS["gene_id"]
+
+    is_gene = match_by == "gene"
+    level_label = "gene-level" if is_gene else "event-level"
+    fname_suffix = "_genelevel" if is_gene else ""
+
+    # Event-level outputs go into a subfolder
+    if not is_gene:
+        outdir = outdir / "event_level"
+        outdir.mkdir(exist_ok=True, parents=True)
 
     for name_a, name_b in combinations(names, 2):
         label_a = condition_labels[name_a]
@@ -2743,49 +3310,113 @@ def pairwise_splicing_venns(condition_results, condition_labels, outdir):
             if df_a is None or len(df_a) == 0 or df_b is None or len(df_b) == 0:
                 continue
 
-            genes_all_a = set(df_a[gene_col].dropna().unique())
-            genes_all_b = set(df_b[gene_col].dropna().unique())
-            genes_up_a = set(df_a.loc[df_a[dpsi_col] > 0, gene_col].dropna().unique())
-            genes_up_b = set(df_b.loc[df_b[dpsi_col] > 0, gene_col].dropna().unique())
-            genes_down_a = set(df_a.loc[df_a[dpsi_col] < 0, gene_col].dropna().unique())
-            genes_down_b = set(df_b.loc[df_b[dpsi_col] < 0, gene_col].dropna().unique())
+            if is_gene:
+                # Match by GeneID for set operations; display uses geneSymbol
+                _match_col = id_col if id_col in df_a.columns and id_col in df_b.columns else gene_col
+                if _match_col not in df_a.columns or _match_col not in df_b.columns:
+                    continue
+
+                events_all_a = set(df_a[_match_col].dropna().unique())
+                events_all_b = set(df_b[_match_col].dropna().unique())
+
+                # Direction subsets by gene
+                events_inc_a = set(
+                    df_a.loc[df_a[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, _match_col]
+                    .dropna().unique()) if dpsi_col in df_a.columns else set()
+                events_inc_b = set(
+                    df_b.loc[df_b[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, _match_col]
+                    .dropna().unique()) if dpsi_col in df_b.columns else set()
+                events_exc_a = set(
+                    df_a.loc[df_a[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, _match_col]
+                    .dropna().unique()) if dpsi_col in df_a.columns else set()
+                events_exc_b = set(
+                    df_b.loc[df_b[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, _match_col]
+                    .dropna().unique()) if dpsi_col in df_b.columns else set()
+            else:
+                # Build event keys
+                key_a = _make_event_key(df_a, et)
+                key_b = _make_event_key(df_b, et)
+
+                if key_a.eq("").all() or key_b.eq("").all():
+                    continue
+
+                # Add keys as temporary column for set operations
+                df_a = df_a.copy()
+                df_b = df_b.copy()
+                df_a["_ekey"] = key_a.values
+                df_b["_ekey"] = key_b.values
+
+                events_all_a = set(df_a["_ekey"].dropna().unique())
+                events_all_b = set(df_b["_ekey"].dropna().unique())
+
+                # Direction subsets
+                events_inc_a = set(
+                    df_a.loc[df_a[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique())
+                events_inc_b = set(
+                    df_b.loc[df_b[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique())
+                events_exc_a = set(
+                    df_a.loc[df_a[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique())
+                events_exc_b = set(
+                    df_b.loc[df_b[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique())
+
+            # Opposite-direction intersections
+            inc_a_exc_b = events_inc_a & events_exc_b
+            exc_a_inc_b = events_exc_a & events_inc_b
 
             panels = [
-                ("All Significant", genes_all_a, genes_all_b),
-                ("Increased Inclusion (dPSI > 0)", genes_up_a, genes_up_b),
-                ("Decreased Inclusion (dPSI < 0)", genes_down_a, genes_down_b),
+                ("Significant in Either Condition", events_all_a, events_all_b),
+                (f"Included in Both (dPSI \u2265 {INCLEVEL_DIFF_CUTOFF})",
+                 events_inc_a, events_inc_b),
+                (f"Excluded in Both (dPSI \u2264 \u2212{INCLEVEL_DIFF_CUTOFF})",
+                 events_exc_a, events_exc_b),
+                (f"Inc {label_a} / Exc {label_b}",
+                 events_inc_a, events_exc_b),
+                (f"Exc {label_a} / Inc {label_b}",
+                 events_exc_a, events_inc_b),
             ]
 
-            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-            for idx, (panel_title, set_a, set_b) in enumerate(panels):
-                ax = axes[idx]
-                v = venn2([set_a, set_b], set_labels=(label_a, label_b), ax=ax)
-                if v is not None:
-                    for rid, col in [("10", "#0072B2"), ("01", "#E69F00"), ("11", "#009E73")]:
-                        patch = v.get_patch_by_id(rid)
-                        if patch:
-                            patch.set_color(col)
-                            patch.set_alpha(0.6)
-                ax.set_title(f"{panel_title} (n={len(set_a | set_b)})",
-                             fontsize=12, fontweight="bold")
+            fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+            axes_flat = axes.flatten()
 
-            fig.suptitle(f"{et} Splicing Events \u2014 {label_a} vs {label_b}",
+            for idx, (panel_title, set_a, set_b) in enumerate(panels):
+                ax = axes_flat[idx]
+                v = venn2([set_a, set_b], set_labels=(label_a, label_b), ax=ax)
+                _style_venn(v, 2)
+                ax.set_title(f"{panel_title}\n({label_a}: {len(set_a)} | {label_b}: {len(set_b)})",
+                             fontsize=11, fontweight="bold")
+
+            # Hide unused 6th panel
+            axes_flat[5].set_visible(False)
+
+            fig.suptitle(f"{et} Splicing Events ({level_label}) \u2014 "
+                         f"{label_a} vs {label_b}",
                          fontsize=14, fontweight="bold")
             plt.tight_layout()
-            outpath = outdir / f"venn_splicing_{et}_{name_a}_vs_{name_b}.{FIG_FORMAT}"
+            outpath = outdir / f"venn_splicing_{et}_{name_a}_vs_{name_b}{fname_suffix}.{FIG_FORMAT}"
             fig.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
             plt.close(fig)
 
             print(f"  Saved: {outpath.name} "
-                  f"(All: {len(genes_all_a - genes_all_b)}|{len(genes_all_a & genes_all_b)}|{len(genes_all_b - genes_all_a)}, "
-                  f"Up: {len(genes_up_a - genes_up_b)}|{len(genes_up_a & genes_up_b)}|{len(genes_up_b - genes_up_a)}, "
-                  f"Down: {len(genes_down_a - genes_down_b)}|{len(genes_down_a & genes_down_b)}|{len(genes_down_b - genes_down_a)})")
+                  f"(All: {len(events_all_a - events_all_b)}|"
+                  f"{len(events_all_a & events_all_b)}|"
+                  f"{len(events_all_b - events_all_a)}, "
+                  f"Inc/Exc: {len(inc_a_exc_b)}, "
+                  f"Exc/Inc: {len(exc_a_inc_b)})")
 
 
 def pairwise_deg_venns(condition_results, condition_labels, outdir):
-    """Pairwise 3-panel Venn diagrams for differentially expressed genes.
+    """Pairwise 5-panel Venn diagrams for differentially expressed genes.
 
-    For each pair of conditions: All Significant DEGs, Upregulated, Downregulated.
+    Panels:
+        1. All Significant DEGs
+        2. Upregulated in both
+        3. Downregulated in both
+        4. Up in {A}, Down in {B}
+        5. Down in {A}, Up in {B}
     """
     outdir = Path(outdir)
     names = list(condition_results.keys())
@@ -2811,26 +3442,33 @@ def pairwise_deg_venns(condition_results, condition_labels, outdir):
         down_a = set(filt_a.loc[filt_a["direction"] == "down", key_col_a].dropna().unique())
         down_b = set(filt_b.loc[filt_b["direction"] == "down", key_col_b].dropna().unique())
 
+        # Opposite-direction intersections
+        up_a_down_b = up_a & down_b
+        down_a_up_b = down_a & up_b
+
         panels = [
-            ("All Significant DEGs", all_a, all_b),
+            ("Significant in Either Condition", all_a, all_b),
             ("Upregulated", up_a, up_b),
             ("Downregulated", down_a, down_b),
+            (f"Up in {label_a} / Down in {label_b}", up_a, down_b),
+            (f"Down in {label_a} / Up in {label_b}", down_a, up_b),
         ]
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        for idx, (panel_title, set_a, set_b) in enumerate(panels):
-            ax = axes[idx]
-            v = venn2([set_a, set_b], set_labels=(label_a, label_b), ax=ax)
-            if v is not None:
-                for rid, col in [("10", "#0072B2"), ("01", "#E69F00"), ("11", "#009E73")]:
-                    patch = v.get_patch_by_id(rid)
-                    if patch:
-                        patch.set_color(col)
-                        patch.set_alpha(0.6)
-            ax.set_title(f"{panel_title} (n={len(set_a | set_b)})",
-                         fontsize=12, fontweight="bold")
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+        axes_flat = axes.flatten()
 
-        fig.suptitle(f"Differentially Expressed Genes \u2014 {label_a} vs {label_b}",
+        for idx, (panel_title, set_a, set_b) in enumerate(panels):
+            ax = axes_flat[idx]
+            v = venn2([set_a, set_b], set_labels=(label_a, label_b), ax=ax)
+            _style_venn(v, 2)
+            ax.set_title(f"{panel_title}\n({label_a}: {len(set_a)} | {label_b}: {len(set_b)})",
+                         fontsize=11, fontweight="bold")
+
+        # Hide unused 6th panel
+        axes_flat[5].set_visible(False)
+
+        fig.suptitle(f"Differentially Expressed Genes \u2014 "
+                     f"{label_a} vs {label_b}",
                      fontsize=14, fontweight="bold")
         plt.tight_layout()
         outpath = outdir / f"venn_deg_{name_a}_vs_{name_b}.{FIG_FORMAT}"
@@ -2840,7 +3478,8 @@ def pairwise_deg_venns(condition_results, condition_labels, outdir):
         print(f"  Saved: {outpath.name} "
               f"(All: {len(all_a - all_b)}|{len(all_a & all_b)}|{len(all_b - all_a)}, "
               f"Up: {len(up_a - up_b)}|{len(up_a & up_b)}|{len(up_b - up_a)}, "
-              f"Down: {len(down_a - down_b)}|{len(down_a & down_b)}|{len(down_b - down_a)})")
+              f"Down: {len(down_a - down_b)}|{len(down_a & down_b)}|{len(down_b - down_a)}, "
+              f"Up/Down: {len(up_a_down_b)}, Down/Up: {len(down_a_up_b)})")
 
 
 # ---------------------------------------------------------------------------
@@ -2975,9 +3614,10 @@ def expression_rank_plot(df, outdir, label="All", suffix=""):
     data = data.sort_values(cols["log2fc"]).reset_index(drop=True)
     rank = np.arange(len(data))
 
+    _bm_ok = (data[cols["basemean"]] >= BASEMEAN_CUTOFF) if cols["basemean"] in data.columns else True
     conds = [
-        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] >= LOG2FC_CUTOFF),
-        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] <= -LOG2FC_CUTOFF),
+        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] >= LOG2FC_CUTOFF) & _bm_ok,
+        (data[cols["padj"]] < PADJ_CUTOFF) & (data[cols["log2fc"]] <= -LOG2FC_CUTOFF) & _bm_ok,
     ]
     data["status"] = np.select(conds, ["Up", "Down"], default="NS")
 
@@ -2988,24 +3628,25 @@ def expression_rank_plot(df, outdir, label="All", suffix=""):
         ("Up",   COLOR_UP,   6, 0.75, 2),
     ]:
         mask = data["status"] == status
+        lbl = "NS" if status == "NS" else f"{status} ({mask.sum():,})"
         ax.scatter(rank[mask], data.loc[mask, cols["log2fc"]],
                    c=color, s=size, alpha=alpha, edgecolors="none", rasterized=True, zorder=z,
-                   label=f"{status} ({mask.sum():,})")
+                   label=lbl)
 
     ax.axhline(0, color="black", lw=0.8)
     ax.axhline( LOG2FC_CUTOFF, color="grey", ls="--", lw=0.7)
     ax.axhline(-LOG2FC_CUTOFF, color="grey", ls="--", lw=0.7)
     n_up   = (data["status"] == "Up").sum()
     n_down = (data["status"] == "Down").sum()
-    add_count_box(ax, n_up, n_down, n_up + n_down, position="upper left")
+    add_count_box(ax, n_up, n_down, n_up + n_down, position="lower left")
     ax.set_xlabel("Gene Rank (sorted by log$_2$ FC)")
     ax.set_ylabel("log$_2$ Fold Change")
     ax.set_title(f"Expression Rank Plot — {label}")
-    ax.legend(loc="upper right", fontsize=9, markerscale=2)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9, markerscale=2)
 
     fname = f"expression_rank_plot{suffix}.{FIG_FORMAT}"
     outpath = outdir / fname
-    fig.savefig(outpath, format=FIG_FORMAT)
+    fig.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -3070,7 +3711,7 @@ def deseq2_upset_plot(condition_results, condition_labels, outdir):
     gene_col = DESEQ2_COLS["gene_name"]
 
     for set_key, title_suffix, fname in [
-        ("all_sig", "All Significant DE Genes", "deseq2_upset_all_sig"),
+        ("all_sig", "Significant in Either Condition", "deseq2_upset_all_sig"),
         ("up",      "Upregulated Genes",         "deseq2_upset_up"),
         ("down",    "Downregulated Genes",        "deseq2_upset_down"),
     ]:
@@ -3167,9 +3808,10 @@ def pairwise_log2fc_scatter(condition_results, condition_labels, outdir):
                      "NS": COLOR_NS}
         for st in ["NS", f"Only {lblA}", f"Only {lblB}", "Both sig"]:
             sub = merged[merged["status"] == st]
+            lbl = "NS" if st == "NS" else f"{st} ({len(sub):,})"
             ax.scatter(sub[f"{fc_col}_A"], sub[f"{fc_col}_B"],
                        c=color_map.get(st, "#aaaaaa"), s=5, alpha=0.5,
-                       edgecolors="none", rasterized=True, label=f"{st} ({len(sub):,})")
+                       edgecolors="none", rasterized=True, label=lbl)
 
         # Diagonal y=x
         lims = [min(merged[f"{fc_col}_A"].min(), merged[f"{fc_col}_B"].min()) - 0.2,
@@ -3179,9 +3821,16 @@ def pairwise_log2fc_scatter(condition_results, condition_labels, outdir):
 
         if _SCIPY_AVAILABLE and len(merged) >= 3:
             r, _ = pearsonr(merged[f"{fc_col}_A"], merged[f"{fc_col}_B"])
-            ax.text(0.05, 0.95, f"R² = {r**2:.3f}\nn = {len(merged)}", transform=ax.transAxes,
-                    ha="left", va="top", fontsize=9,
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="grey", alpha=0.8))
+            # Line of best fit
+            x_arr = merged[f"{fc_col}_A"].values
+            y_arr = merged[f"{fc_col}_B"].values
+            slope, intercept = np.polyfit(x_arr, y_arr, 1)
+            x_fit = np.linspace(x_arr.min(), x_arr.max(), 100)
+            ax.plot(x_fit, slope * x_fit + intercept, color="#E69F00", lw=1.5, alpha=0.8)
+            ax.annotate(f"R² = {r**2:.3f}\nn = {len(merged)}", xy=(0, 1), xycoords="axes fraction",
+                        xytext=(4, 4), textcoords="offset points",
+                        ha="left", va="bottom", fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="grey", alpha=0.9))
 
         ax.set_xlabel(f"log$_2$FC  {lblA}", fontsize=9)
         ax.set_ylabel(f"log$_2$FC  {lblB}", fontsize=9)
@@ -3194,7 +3843,7 @@ def pairwise_log2fc_scatter(condition_results, condition_labels, outdir):
     fig.suptitle("Pairwise log$_2$FC Comparison (Shared Genes)", fontsize=13, fontweight="bold")
     plt.tight_layout()
     outpath = outdir / f"pairwise_log2fc_scatter.{FIG_FORMAT}"
-    fig.savefig(outpath, format=FIG_FORMAT)
+    fig.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
@@ -3296,16 +3945,37 @@ def rmats_event_count_comparison(rmats_conditions, condition_labels, outdir):
     print(f"  Saved: {outpath}")
 
 
-def pairwise_dpsi_scatter(rmats_conditions, condition_labels, outdir):
-    """Pairwise scatter of dPSI for shared splicing events across conditions."""
+def pairwise_dpsi_scatter(rmats_conditions, condition_labels, outdir,
+                          match_by="event"):
+    """Pairwise scatter of dPSI for shared splicing events.
+
+    Parameters
+    ----------
+    match_by : str
+        ``"event"`` (default) matches by genomic coordinates via
+        ``_make_event_key()``.  ``"gene"`` matches by the ``geneSymbol``
+        column; when a gene has multiple events the event with the largest
+        |dPSI| is used as the representative scatter point.
+    """
     names = list(rmats_conditions.keys())
     if len(names) < 2:
         return
 
     dpsi_col = RMATS_COLS["inclevel_diff"]
-    id_col   = RMATS_COLS["event_id"]
-    pairs    = list(combinations(names, 2))
+    gene_col = RMATS_COLS["gene_name"]
+    id_col   = RMATS_COLS["gene_id"]
+    pairs = list(combinations(names, 2))
     nrows, ncols = _grid_dims(len(pairs))
+
+    is_gene = match_by == "gene"
+    level_label = "gene-level" if is_gene else "coordinate-level"
+    fname_suffix = "_genelevel" if is_gene else ""
+
+    # Event-level outputs go into a subfolder
+    outdir = Path(outdir)
+    if not is_gene:
+        outdir = outdir / "event_level"
+        outdir.mkdir(exist_ok=True, parents=True)
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows), squeeze=False)
     axes_flat = [axes[r][c] for r in range(nrows) for c in range(ncols)]
@@ -3321,14 +3991,57 @@ def pairwise_dpsi_scatter(rmats_conditions, condition_labels, outdir):
             dfB = rmats_conditions[nameB]["rmats_filtered"].get(et, pd.DataFrame())
             if len(dfA) == 0 or len(dfB) == 0:
                 continue
-            if id_col not in dfA.columns or id_col not in dfB.columns:
-                continue
-            merged = dfA[[id_col, dpsi_col]].merge(
-                dfB[[id_col, dpsi_col]], on=id_col, suffixes=("_A", "_B"))
-            if len(merged) == 0:
-                continue
-            merged["event_type"] = et
-            all_rows.append(merged)
+
+            if is_gene:
+                # Match by GeneID; fall back to geneSymbol
+                _match_col = id_col if id_col in dfA.columns and id_col in dfB.columns else gene_col
+                if _match_col not in dfA.columns or _match_col not in dfB.columns:
+                    continue
+                if dpsi_col not in dfA.columns or dpsi_col not in dfB.columns:
+                    continue
+
+                # For gene-level: pick event with largest |dPSI| per gene
+                dfA = dfA.copy()
+                dfB = dfB.copy()
+                dfA["_abs_dpsi"] = dfA[dpsi_col].abs()
+                dfB["_abs_dpsi"] = dfB[dpsi_col].abs()
+                repA = dfA.loc[dfA.groupby(_match_col)["_abs_dpsi"].idxmax()]
+                repB = dfB.loc[dfB.groupby(_match_col)["_abs_dpsi"].idxmax()]
+
+                cols_a = [_match_col, dpsi_col]
+                cols_b = [_match_col, dpsi_col]
+                merged = repA[cols_a].merge(
+                    repB[cols_b], on=_match_col, suffixes=("_A", "_B"))
+                if len(merged) == 0:
+                    continue
+                merged["event_type"] = et
+                all_rows.append(merged)
+            else:
+                # Build event keys
+                keyA = _make_event_key(dfA, et)
+                keyB = _make_event_key(dfB, et)
+                if keyA.eq("").all() or keyB.eq("").all():
+                    continue
+
+                dfA = dfA.copy()
+                dfB = dfB.copy()
+                dfA["_ekey"] = keyA.values
+                dfB["_ekey"] = keyB.values
+
+                # Keep gene symbol for tooltip / labeling
+                cols_a = ["_ekey", dpsi_col]
+                cols_b = ["_ekey", dpsi_col]
+                if gene_col in dfA.columns:
+                    cols_a.append(gene_col)
+                if gene_col in dfB.columns:
+                    cols_b.append(gene_col)
+
+                merged = dfA[cols_a].merge(
+                    dfB[cols_b], on="_ekey", suffixes=("_A", "_B"))
+                if len(merged) == 0:
+                    continue
+                merged["event_type"] = et
+                all_rows.append(merged)
 
         if not all_rows:
             ax.set_visible(False)
@@ -3343,18 +4056,28 @@ def pairwise_dpsi_scatter(rmats_conditions, condition_labels, outdir):
                        c=EVENT_COLORS.get(et, "#888888"), s=8, alpha=0.6,
                        edgecolors="none", rasterized=True, label=f"{et} ({len(sub):,})")
 
-        lims = [min(combined[f"{dpsi_col}_A"].min(), combined[f"{dpsi_col}_B"].min()) - 0.05,
-                max(combined[f"{dpsi_col}_A"].max(), combined[f"{dpsi_col}_B"].max()) + 0.05]
+        lims = [min(combined[f"{dpsi_col}_A"].min(),
+                    combined[f"{dpsi_col}_B"].min()) - 0.05,
+                max(combined[f"{dpsi_col}_A"].max(),
+                    combined[f"{dpsi_col}_B"].max()) + 0.05]
         ax.plot(lims, lims, "k--", lw=0.7, alpha=0.5)
         ax.axhline(0, color="black", lw=0.5)
         ax.axvline(0, color="black", lw=0.5)
-        ax.set_xlim(lims); ax.set_ylim(lims)
+        ax.set_xlim(lims)
+        ax.set_ylim(lims)
 
         if _SCIPY_AVAILABLE and len(combined) >= 3:
             r, _ = pearsonr(combined[f"{dpsi_col}_A"], combined[f"{dpsi_col}_B"])
-            ax.text(0.05, 0.95, f"R² = {r**2:.3f}", transform=ax.transAxes,
-                    ha="left", va="top", fontsize=9,
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="grey", alpha=0.8))
+            x_arr = combined[f"{dpsi_col}_A"].values
+            y_arr = combined[f"{dpsi_col}_B"].values
+            slope, intercept = np.polyfit(x_arr, y_arr, 1)
+            x_fit = np.linspace(x_arr.min(), x_arr.max(), 100)
+            ax.plot(x_fit, slope * x_fit + intercept, color="#E69F00", lw=1.5, alpha=0.8)
+            ax.annotate(f"R\u00b2 = {r**2:.3f}", xy=(0, 1), xycoords="axes fraction",
+                        xytext=(4, 4), textcoords="offset points",
+                        ha="left", va="bottom", fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                                  edgecolor="grey", alpha=0.9))
 
         ax.set_xlabel(f"dPSI  {lblA}", fontsize=9)
         ax.set_ylabel(f"dPSI  {lblB}", fontsize=9)
@@ -3364,16 +4087,27 @@ def pairwise_dpsi_scatter(rmats_conditions, condition_labels, outdir):
     for i in range(len(pairs), nrows * ncols):
         axes_flat[i].set_visible(False)
 
-    fig.suptitle("Pairwise dPSI Comparison (Shared Splicing Events)", fontsize=13, fontweight="bold")
+    fig.suptitle(f"Pairwise dPSI Comparison (Shared Splicing Events, {level_label})",
+                 fontsize=13, fontweight="bold")
     plt.tight_layout()
-    outpath = outdir / f"pairwise_dpsi_scatter.{FIG_FORMAT}"
-    fig.savefig(outpath, format=FIG_FORMAT)
+    outpath = Path(outdir) / f"pairwise_dpsi_scatter{fname_suffix}.{FIG_FORMAT}"
+    fig.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
 
-def rmats_upset_plot(rmats_conditions, condition_labels, outdir):
-    """UpSet plot for rMATS splicing gene sets across 3-5 conditions (requires upsetplot)."""
+def rmats_upset_plot(rmats_conditions, condition_labels, outdir,
+                     match_by="event"):
+    """UpSet plot for rMATS splicing event sets across 3+ conditions.
+
+    Parameters
+    ----------
+    match_by : str
+        ``"event"`` (default) matches by genomic coordinates via
+        ``_make_event_key()``.  ``"gene"`` matches by the ``geneSymbol``
+        column so each gene is counted once regardless of the number of
+        splicing events it has.
+    """
     if not _UPSET_AVAILABLE:
         print("  Skipping rMATS UpSet: 'upsetplot' not installed (pip install upsetplot)")
         return
@@ -3381,64 +4115,632 @@ def rmats_upset_plot(rmats_conditions, condition_labels, outdir):
         print("  Skipping rMATS UpSet: requires 3+ conditions with rMATS data")
         return
 
-    names  = list(rmats_conditions.keys())
+    names = list(rmats_conditions.keys())
     labels = [condition_labels[n] for n in names]
     gene_col = RMATS_COLS["gene_name"]
+    id_col   = RMATS_COLS["gene_id"]
 
-    # Gene-level upset (all event types combined)
-    gene_sets = {}
+    is_gene = match_by == "gene"
+    level_label = "gene-level" if is_gene else "coordinate-level"
+    fname_suffix = "_genelevel" if is_gene else ""
+
+    # Event-level outputs go into a subfolder
+    outdir = Path(outdir)
+    if not is_gene:
+        outdir = outdir / "event_level"
+        outdir.mkdir(exist_ok=True, parents=True)
+
+    # Combined upset (all event types)
+    event_sets = {}
     for name, lbl in zip(names, labels):
-        genes = set()
-        for et_df in rmats_conditions[name]["rmats_filtered"].values():
-            if len(et_df) > 0 and gene_col in et_df.columns:
-                genes.update(et_df[gene_col].dropna().unique())
-        gene_sets[lbl] = genes
+        items = set()
+        for et, et_df in rmats_conditions[name]["rmats_filtered"].items():
+            if len(et_df) > 0:
+                if is_gene:
+                    # Match by GeneID; fall back to geneSymbol
+                    _match_col = id_col if id_col in et_df.columns else gene_col
+                    if _match_col in et_df.columns:
+                        items.update(et_df[_match_col].dropna().unique())
+                else:
+                    keys = _make_event_key(et_df, et)
+                    # Prefix with event type to avoid cross-type collisions
+                    items.update(f"{et}|{k}" for k in keys[keys != ""].unique())
+        event_sets[lbl] = items
 
-    all_genes = set.union(*gene_sets.values()) if gene_sets else set()
-    if all_genes:
-        memberships = [tuple(lbl for lbl in labels if g in gene_sets[lbl]) for g in all_genes]
+    all_events = set.union(*event_sets.values()) if event_sets else set()
+    if all_events:
+        memberships = [tuple(lbl for lbl in labels if ev in event_sets[lbl])
+                       for ev in all_events]
         try:
             upset_data = from_memberships(memberships)
-            upset_data = upset_data.groupby(level=list(range(upset_data.index.nlevels))).sum()
+            upset_data = upset_data.groupby(
+                level=list(range(upset_data.index.nlevels))).sum()
             upset = UpSet(upset_data, show_counts=True, sort_by="cardinality")
             upset.plot()
-            plt.suptitle("rMATS UpSet — Splicing Gene Overlap (All Event Types)",
+            plt.suptitle(f"rMATS UpSet \u2014 Splicing Event Overlap ({level_label})",
                          y=1.02, fontsize=12, fontweight="bold")
-            outpath = outdir / f"rmats_upset_genes.{FIG_FORMAT}"
+            outpath = Path(outdir) / f"rmats_upset_events{fname_suffix}.{FIG_FORMAT}"
             plt.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
             plt.close("all")
             print(f"  Saved: {outpath}")
         except Exception as e:
-            print(f"  rMATS UpSet (genes) failed: {e}")
+            print(f"  rMATS UpSet (events) failed: {e}")
 
     # Per-event-type upsets
     for et in RMATS_EVENT_TYPES:
         et_sets = {}
         for name, lbl in zip(names, labels):
             filt_df = rmats_conditions[name]["rmats_filtered"].get(et, pd.DataFrame())
-            if len(filt_df) > 0 and gene_col in filt_df.columns:
-                et_sets[lbl] = set(filt_df[gene_col].dropna().unique())
-        # Only plot if at least 2 conditions have events of this type
+            if len(filt_df) > 0:
+                if is_gene:
+                    # Match by GeneID; fall back to geneSymbol
+                    _match_col = id_col if id_col in filt_df.columns else gene_col
+                    if _match_col in filt_df.columns:
+                        et_sets[lbl] = set(filt_df[_match_col].dropna().unique())
+                else:
+                    keys = _make_event_key(filt_df, et)
+                    et_sets[lbl] = set(keys[keys != ""].unique())
         active = {lbl: s for lbl, s in et_sets.items() if s}
         if len(active) < 2:
             continue
-        all_et_genes = set.union(*active.values())
-        all_labels = labels  # include all, even if empty set
-        memberships = [tuple(lbl for lbl in all_labels if lbl in et_sets and g in et_sets[lbl])
-                       for g in all_et_genes]
+        all_et_events = set.union(*active.values())
+        all_labels = labels
+        memberships = [tuple(lbl for lbl in all_labels
+                             if lbl in et_sets and ev in et_sets[lbl])
+                       for ev in all_et_events]
         try:
             upset_data = from_memberships(memberships)
-            upset_data = upset_data.groupby(level=list(range(upset_data.index.nlevels))).sum()
+            upset_data = upset_data.groupby(
+                level=list(range(upset_data.index.nlevels))).sum()
             upset = UpSet(upset_data, show_counts=True, sort_by="cardinality")
             upset.plot()
-            plt.suptitle(f"rMATS UpSet — {et} Gene Overlap",
+            plt.suptitle(f"rMATS UpSet \u2014 {et} Event Overlap ({level_label})",
                          y=1.02, fontsize=12, fontweight="bold")
-            outpath = outdir / f"rmats_upset_{et}.{FIG_FORMAT}"
+            outpath = Path(outdir) / f"rmats_upset_{et}{fname_suffix}.{FIG_FORMAT}"
             plt.savefig(outpath, format=FIG_FORMAT, bbox_inches="tight")
             plt.close("all")
             print(f"  Saved: {outpath}")
         except Exception as e:
             print(f"  rMATS UpSet ({et}) failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# EVENT-LEVEL HEATMAP, PIE CHART, AND PAIRWISE WORKBOOK EXPORT
+# ---------------------------------------------------------------------------
+
+def rmats_event_heatmap(condition_results, condition_labels, event_type, outdir):
+    """Clustered heatmap of dPSI values across conditions for a specific event type.
+
+    Parameters
+    ----------
+    condition_results : dict
+        {name: {"rmats_filtered": {et: df, ...}, ...}} structure.
+    condition_labels : dict
+        {name: label} mapping.
+    event_type : str
+        One of RMATS_EVENT_TYPES (e.g. "SE").
+    outdir : str or Path
+        Output directory.
+    """
+    outdir = Path(outdir)
+    names = list(condition_results.keys())
+    labels = [condition_labels[n] for n in names]
+    dpsi_col = RMATS_COLS["inclevel_diff"]
+    gene_col = RMATS_COLS["gene_name"]
+
+    # Collect dPSI per event key for each condition
+    event_data = {}
+    gene_lookup = {}  # event_key -> geneSymbol
+
+    for name, lbl in zip(names, labels):
+        filt_df = condition_results[name]["rmats_filtered"].get(event_type, pd.DataFrame())
+        if len(filt_df) == 0:
+            continue
+        df = filt_df.copy()
+        df["_ekey"] = _make_event_key(df, event_type).values
+        df = df[df["_ekey"] != ""]
+        if len(df) == 0:
+            continue
+
+        # Mean dPSI per event key (handles potential duplicates)
+        grouped = df.groupby("_ekey").agg(
+            dpsi=(dpsi_col, "mean"),
+            gene=(gene_col, "first") if gene_col in df.columns else (dpsi_col, "count"),
+        )
+        event_data[lbl] = grouped["dpsi"]
+
+        # Store gene symbol mapping
+        if gene_col in df.columns:
+            for ekey, gene in df.groupby("_ekey")[gene_col].first().items():
+                if ekey not in gene_lookup and pd.notna(gene):
+                    gene_lookup[ekey] = gene
+
+    if len(event_data) < 2:
+        print(f"  Skipping {event_type} heatmap (insufficient conditions with data)")
+        return
+
+    # Build matrix: rows = events, columns = conditions
+    dpsi_df = pd.DataFrame(event_data)
+
+    # Keep only events significant in at least 1 condition (non-NaN in >= 1 col)
+    dpsi_df = dpsi_df.dropna(how="all")
+    if len(dpsi_df) == 0:
+        print(f"  Skipping {event_type} heatmap (no events to plot)")
+        return
+
+    # Limit to top 80 events by max |dPSI| across conditions
+    max_events = 80
+    if len(dpsi_df) > max_events:
+        max_abs_dpsi = dpsi_df.abs().max(axis=1)
+        top_idx = max_abs_dpsi.nlargest(max_events).index
+        dpsi_df = dpsi_df.loc[top_idx]
+
+    # Replace event keys with gene symbols for row labels
+    row_labels = []
+    for ekey in dpsi_df.index:
+        gene = gene_lookup.get(ekey, "")
+        if gene:
+            # Abbreviate coordinate key for uniqueness
+            coord_short = ekey.split(":")[0] + ":" + ekey.split(":")[-1]
+            row_labels.append(f"{gene} ({coord_short})")
+        else:
+            row_labels.append(ekey[:40])
+    dpsi_df.index = row_labels
+
+    # Fill NaN with 0 for clustering (event not significant in that condition)
+    dpsi_filled = dpsi_df.fillna(0)
+
+    # Create diverging colormap matching pipeline colors (blue-white-orange)
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list(
+        "dpsi_diverging", [COLOR_DOWN, "white", COLOR_UP], N=256)
+
+    # Determine symmetric color limits
+    vmax = max(abs(dpsi_filled.values.min()), abs(dpsi_filled.values.max()))
+    vmax = max(vmax, INCLEVEL_DIFF_CUTOFF)  # Ensure at least the cutoff is visible
+
+    # Determine figure height based on number of events
+    fig_height = max(8, len(dpsi_df) * 0.25 + 2)
+    fig_width = max(6, len(labels) * 1.5 + 4)
+
+    try:
+        g = sns.clustermap(
+            dpsi_filled,
+            cmap=cmap,
+            center=0,
+            vmin=-vmax,
+            vmax=vmax,
+            figsize=(fig_width, fig_height),
+            dendrogram_ratio=(0.15, 0.05),
+            cbar_kws={"label": "dPSI (IncLevelDifference)", "shrink": 0.6},
+            linewidths=0.5,
+            linecolor="white",
+            yticklabels=True,
+            xticklabels=True,
+            row_cluster=len(dpsi_filled) > 1,
+            col_cluster=len(dpsi_filled.columns) > 1,
+        )
+
+        g.fig.suptitle(
+            f"dPSI Heatmap \u2014 {event_type} Events (coordinate-level, "
+            f"top {len(dpsi_df)} by |dPSI|)",
+            fontsize=13, fontweight="bold", y=1.02)
+
+        # Adjust row label font size for readability
+        g.ax_heatmap.set_yticklabels(
+            g.ax_heatmap.get_yticklabels(), fontsize=7, rotation=0)
+        g.ax_heatmap.set_xticklabels(
+            g.ax_heatmap.get_xticklabels(), fontsize=10, rotation=45, ha="right")
+
+        outpath = outdir / f"heatmap_dpsi_{event_type}.{FIG_FORMAT}"
+        g.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
+        plt.close("all")
+        print(f"  Saved: {outpath}")
+    except Exception as e:
+        print(f"  {event_type} heatmap failed: {e}")
+        plt.close("all")
+
+
+def rmats_event_pie_chart(condition_results, condition_labels, outdir):
+    """Pie chart per condition showing splicing event type distribution.
+
+    Parameters
+    ----------
+    condition_results : dict
+        {name: {"rmats_filtered": {et: df, ...}, ...}}.
+    condition_labels : dict
+        {name: label}.
+    outdir : str or Path
+        Output directory.
+    """
+    outdir = Path(outdir)
+    names = list(condition_results.keys())
+    labels = [condition_labels[n] for n in names]
+    n_conds = len(names)
+
+    if n_conds == 0:
+        return
+
+    nrows, ncols = _grid_dims(n_conds)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
+    if n_conds == 1:
+        axes_flat = [axes]
+    else:
+        axes_flat = axes.flatten() if hasattr(axes, "flatten") else [axes]
+
+    for idx, (name, lbl) in enumerate(zip(names, labels)):
+        ax = axes_flat[idx]
+
+        counts = []
+        et_labels = []
+        colors = []
+        for et in RMATS_EVENT_TYPES:
+            filt_df = condition_results[name]["rmats_filtered"].get(et, pd.DataFrame())
+            n_events = len(filt_df)
+            if n_events > 0:
+                counts.append(n_events)
+                et_labels.append(et)
+                colors.append(EVENT_COLORS.get(et, "#888888"))
+
+        if not counts:
+            ax.text(0.5, 0.5, "No significant\nevents", ha="center", va="center",
+                    fontsize=11, transform=ax.transAxes)
+            ax.set_title(lbl, fontsize=12, fontweight="bold")
+            ax.axis("off")
+            continue
+
+        total = sum(counts)
+        wedges, texts, autotexts = ax.pie(
+            counts,
+            labels=et_labels,
+            colors=colors,
+            autopct=lambda pct: f"{pct:.1f}%\n({int(round(pct / 100 * total))})",
+            startangle=90,
+            pctdistance=0.65,
+            textprops={"fontsize": 9},
+        )
+        for autotext in autotexts:
+            autotext.set_fontsize(8)
+            autotext.set_fontweight("bold")
+
+        ax.set_title(f"{lbl}\n(n={total:,} events)", fontsize=12, fontweight="bold")
+
+    # Hide unused panels
+    for i in range(n_conds, len(axes_flat)):
+        axes_flat[i].set_visible(False)
+
+    fig.suptitle("rMATS \u2014 Significant Event Type Distribution",
+                 fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    outpath = outdir / f"rmats_event_type_pie.{FIG_FORMAT}"
+    fig.savefig(outpath, format=FIG_FORMAT, dpi=FIG_DPI, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {outpath}")
+
+
+def export_pairwise_workbook(condition_results, condition_labels, outdir):
+    """Export pairwise comparison Excel workbooks for DESeq2 and rMATS data.
+
+    For each pair of conditions, creates one .xlsx file with:
+      - DESeq2 sheets: shared (all/up/down), opposite-direction, condition-only
+      - rMATS sheets (per event type): same breakdown by event coordinates
+      - Summary sheet with row counts per category
+
+    Parameters
+    ----------
+    condition_results : dict
+        {name: {"deseq2_filtered": {"all_genes": df}, "rmats_filtered": {et: df}}}.
+    condition_labels : dict
+        {name: label}.
+    outdir : str or Path
+        Output directory.
+    """
+    outdir = Path(outdir)
+    names = list(condition_results.keys())
+    dpsi_col = RMATS_COLS["inclevel_diff"]
+    gene_col = RMATS_COLS["gene_name"]
+    id_col   = RMATS_COLS["gene_id"]
+    lfc_col = DESEQ2_COLS["log2fc"]
+
+    def _short(label):
+        """Short label from condition label for column suffixing."""
+        parts = label.split(" vs ")
+        return parts[0].replace(" ", "_") if parts else label.replace(" ", "_")
+
+    for name_a, name_b in combinations(names, 2):
+        label_a = condition_labels[name_a]
+        label_b = condition_labels[name_b]
+        short_a = _short(label_a)
+        short_b = _short(label_b)
+
+        wb_name = f"pairwise_{name_a}_vs_{name_b}.xlsx"
+        wb_path = outdir / wb_name
+        summary_rows = []
+
+        with pd.ExcelWriter(wb_path, engine="openpyxl") as writer:
+
+            # -------------------------------------------------------
+            # DESeq2 sheets
+            # -------------------------------------------------------
+            filt_a = condition_results[name_a]["deseq2_filtered"]["all_genes"].copy()
+            filt_b = condition_results[name_b]["deseq2_filtered"]["all_genes"].copy()
+
+            # Determine best gene key for matching
+            key_col_a, _ = _best_gene_key(filt_a)
+            key_col_b, _ = _best_gene_key(filt_b)
+            if not key_col_a or key_col_a not in filt_a.columns:
+                key_col_a = DESEQ2_COLS["gene_name"]
+            if not key_col_b or key_col_b not in filt_b.columns:
+                key_col_b = DESEQ2_COLS["gene_name"]
+
+            # Ensure consistent key column name for merging
+            merge_key = key_col_a
+            if key_col_b != key_col_a and key_col_b in filt_b.columns:
+                # Rename to match for merge
+                filt_b = filt_b.rename(columns={key_col_b: merge_key})
+
+            # Suffix non-key columns
+            suffix_a = f"_{short_a}"
+            suffix_b = f"_{short_b}"
+
+            # Build gene sets
+            all_a = set(filt_a[merge_key].dropna().unique())
+            all_b = set(filt_b[merge_key].dropna().unique())
+
+            dir_col = "direction"
+            up_a = set(filt_a.loc[filt_a[dir_col] == "up", merge_key].dropna().unique())
+            up_b = set(filt_b.loc[filt_b[dir_col] == "up", merge_key].dropna().unique())
+            down_a = set(filt_a.loc[filt_a[dir_col] == "down", merge_key].dropna().unique())
+            down_b = set(filt_b.loc[filt_b[dir_col] == "down", merge_key].dropna().unique())
+
+            shared_all = all_a & all_b
+            shared_up = up_a & up_b
+            shared_down = down_a & down_b
+            up_a_down_b = up_a & down_b
+            down_a_up_b = down_a & up_b
+            only_a = all_a - all_b
+            only_b = all_b - all_a
+
+            de_categories = {
+                "DE_shared_all": shared_all,
+                "DE_shared_up": shared_up,
+                "DE_shared_down": shared_down,
+                f"DE_up_{short_a}_down_{short_b}": up_a_down_b,
+                f"DE_down_{short_a}_up_{short_b}": down_a_up_b,
+                f"DE_only_{short_a}": only_a,
+                f"DE_only_{short_b}": only_b,
+            }
+
+            for sheet_name, gene_set in de_categories.items():
+                if not gene_set:
+                    # Write empty sheet with header
+                    empty_df = pd.DataFrame(columns=[merge_key])
+                    sheet_label = sheet_name[:31]
+                    empty_df.to_excel(writer, sheet_name=sheet_label, index=False)
+                    summary_rows.append({"category": sheet_name, "count": 0})
+                    continue
+
+                # Subset both conditions' data for these genes
+                sub_a = filt_a[filt_a[merge_key].isin(gene_set)].copy()
+                sub_b = filt_b[filt_b[merge_key].isin(gene_set)].copy()
+
+                # Rename non-key columns with suffixes
+                rename_a = {c: f"{c}{suffix_a}" for c in sub_a.columns if c != merge_key}
+                rename_b = {c: f"{c}{suffix_b}" for c in sub_b.columns if c != merge_key}
+                sub_a = sub_a.rename(columns=rename_a)
+                sub_b = sub_b.rename(columns=rename_b)
+
+                # Merge side by side
+                merged = sub_a.merge(sub_b, on=merge_key, how="outer")
+
+                sheet_label = sheet_name[:31]
+                merged.to_excel(writer, sheet_name=sheet_label, index=False)
+                summary_rows.append({"category": sheet_name, "count": len(merged)})
+                print(f"   {sheet_label}: {len(merged):,} genes")
+
+            # -------------------------------------------------------
+            # rMATS sheets (per event type)
+            # -------------------------------------------------------
+            for et in RMATS_EVENT_TYPES:
+                df_a = condition_results[name_a]["rmats_filtered"].get(et)
+                df_b = condition_results[name_b]["rmats_filtered"].get(et)
+
+                has_a = df_a is not None and len(df_a) > 0
+                has_b = df_b is not None and len(df_b) > 0
+
+                if not has_a and not has_b:
+                    continue
+
+                # Prepare DataFrames with event keys
+                if has_a:
+                    df_a = df_a.copy()
+                    df_a["_ekey"] = _make_event_key(df_a, et).values
+                    df_a = df_a[df_a["_ekey"] != ""]
+                else:
+                    df_a = pd.DataFrame(columns=["_ekey"])
+
+                if has_b:
+                    df_b = df_b.copy()
+                    df_b["_ekey"] = _make_event_key(df_b, et).values
+                    df_b = df_b[df_b["_ekey"] != ""]
+                else:
+                    df_b = pd.DataFrame(columns=["_ekey"])
+
+                events_all_a = set(df_a["_ekey"].dropna().unique())
+                events_all_b = set(df_b["_ekey"].dropna().unique())
+
+                # Direction subsets
+                events_inc_a = set(
+                    df_a.loc[df_a[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique()) if has_a and dpsi_col in df_a.columns else set()
+                events_inc_b = set(
+                    df_b.loc[df_b[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique()) if has_b and dpsi_col in df_b.columns else set()
+                events_exc_a = set(
+                    df_a.loc[df_a[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique()) if has_a and dpsi_col in df_a.columns else set()
+                events_exc_b = set(
+                    df_b.loc[df_b[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, "_ekey"]
+                    .dropna().unique()) if has_b and dpsi_col in df_b.columns else set()
+
+                rmats_categories = {
+                    f"{et}_shared_all": events_all_a & events_all_b,
+                    f"{et}_shared_included": events_inc_a & events_inc_b,
+                    f"{et}_shared_excluded": events_exc_a & events_exc_b,
+                    f"{et}_inc_{short_a}_exc_{short_b}": events_inc_a & events_exc_b,
+                    f"{et}_exc_{short_a}_inc_{short_b}": events_exc_a & events_inc_b,
+                    f"{et}_only_{short_a}": events_all_a - events_all_b,
+                    f"{et}_only_{short_b}": events_all_b - events_all_a,
+                }
+
+                # Coordinate columns used as merge keys (not suffixed)
+                coord_cols = _COORD_COLS.get(et, [])
+                # Shared columns that should not be suffixed
+                id_cols = [c for c in [RMATS_COLS["gene_id"], RMATS_COLS["gene_name"]]
+                           if (has_a and c in df_a.columns) or
+                              (has_b and c in df_b.columns)]
+                shared_merge_cols = (
+                    [c for c in coord_cols
+                     if (has_a and c in df_a.columns) or
+                        (has_b and c in df_b.columns)]
+                    + id_cols
+                )
+
+                for sheet_name, event_set in rmats_categories.items():
+                    if not event_set:
+                        empty_df = pd.DataFrame(columns=["_ekey"])
+                        sheet_label = sheet_name[:31]
+                        empty_df.to_excel(writer, sheet_name=sheet_label, index=False)
+                        summary_rows.append({"category": sheet_name, "count": 0})
+                        continue
+
+                    sub_a = df_a[df_a["_ekey"].isin(event_set)].copy() if has_a else pd.DataFrame()
+                    sub_b = df_b[df_b["_ekey"].isin(event_set)].copy() if has_b else pd.DataFrame()
+
+                    # Drop the rMATS ID column (run-specific)
+                    rmats_id = RMATS_COLS["event_id"]
+                    if rmats_id in sub_a.columns:
+                        sub_a = sub_a.drop(columns=[rmats_id])
+                    if rmats_id in sub_b.columns:
+                        sub_b = sub_b.drop(columns=[rmats_id])
+
+                    # Suffix non-shared columns
+                    if len(sub_a) > 0:
+                        rename_a = {c: f"{short_a}_{c}" for c in sub_a.columns
+                                    if c not in shared_merge_cols and c != "_ekey"}
+                        sub_a = sub_a.rename(columns=rename_a)
+
+                    if len(sub_b) > 0:
+                        rename_b = {c: f"{short_b}_{c}" for c in sub_b.columns
+                                    if c not in shared_merge_cols and c != "_ekey"}
+                        sub_b = sub_b.rename(columns=rename_b)
+
+                    # Merge on event key
+                    if len(sub_a) > 0 and len(sub_b) > 0:
+                        merged = sub_a.merge(sub_b.drop(
+                            columns=[c for c in shared_merge_cols if c in sub_b.columns],
+                            errors="ignore"),
+                            on="_ekey", how="outer")
+                    elif len(sub_a) > 0:
+                        merged = sub_a
+                    else:
+                        merged = sub_b
+
+                    # Drop the internal key column before export
+                    if "_ekey" in merged.columns:
+                        merged = merged.drop(columns=["_ekey"])
+
+                    sheet_label = sheet_name[:31]
+                    merged.to_excel(writer, sheet_name=sheet_label, index=False)
+                    summary_rows.append({"category": sheet_name, "count": len(merged)})
+                    print(f"   {sheet_label}: {len(merged):,} events")
+
+            # -------------------------------------------------------
+            # rMATS gene-level sheets (per event type)
+            # -------------------------------------------------------
+            for et in RMATS_EVENT_TYPES:
+                df_a_gl = condition_results[name_a]["rmats_filtered"].get(et)
+                df_b_gl = condition_results[name_b]["rmats_filtered"].get(et)
+
+                has_a_gl = df_a_gl is not None and len(df_a_gl) > 0
+                has_b_gl = df_b_gl is not None and len(df_b_gl) > 0
+
+                if not has_a_gl and not has_b_gl:
+                    continue
+
+                # Build gene sets — match by GeneID, fall back to geneSymbol
+                _gl_id_col = id_col if (
+                    (has_a_gl and id_col in df_a_gl.columns) or
+                    (has_b_gl and id_col in df_b_gl.columns)
+                ) else gene_col
+
+                genes_all_a = set(df_a_gl[_gl_id_col].dropna().unique()) if has_a_gl and _gl_id_col in df_a_gl.columns else set()
+                genes_all_b = set(df_b_gl[_gl_id_col].dropna().unique()) if has_b_gl and _gl_id_col in df_b_gl.columns else set()
+
+                # Direction subsets by gene
+                genes_inc_a = set(
+                    df_a_gl.loc[df_a_gl[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, _gl_id_col]
+                    .dropna().unique()) if has_a_gl and dpsi_col in df_a_gl.columns and _gl_id_col in df_a_gl.columns else set()
+                genes_inc_b = set(
+                    df_b_gl.loc[df_b_gl[dpsi_col] >= INCLEVEL_DIFF_CUTOFF, _gl_id_col]
+                    .dropna().unique()) if has_b_gl and dpsi_col in df_b_gl.columns and _gl_id_col in df_b_gl.columns else set()
+                genes_exc_a = set(
+                    df_a_gl.loc[df_a_gl[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, _gl_id_col]
+                    .dropna().unique()) if has_a_gl and dpsi_col in df_a_gl.columns and _gl_id_col in df_a_gl.columns else set()
+                genes_exc_b = set(
+                    df_b_gl.loc[df_b_gl[dpsi_col] <= -INCLEVEL_DIFF_CUTOFF, _gl_id_col]
+                    .dropna().unique()) if has_b_gl and dpsi_col in df_b_gl.columns and _gl_id_col in df_b_gl.columns else set()
+
+                gene_categories = {
+                    f"{et}_gene_shared_all": genes_all_a & genes_all_b,
+                    f"{et}_gene_shared_inc": genes_inc_a & genes_inc_b,
+                    f"{et}_gene_shared_exc": genes_exc_a & genes_exc_b,
+                    f"{et}_gene_inc{short_a}_exc{short_b}": genes_inc_a & genes_exc_b,
+                    f"{et}_gene_exc{short_a}_inc{short_b}": genes_exc_a & genes_inc_b,
+                    f"{et}_gene_only_{short_a}": genes_all_a - genes_all_b,
+                    f"{et}_gene_only_{short_b}": genes_all_b - genes_all_a,
+                }
+
+                for sheet_name_gl, gene_set_gl in gene_categories.items():
+                    if not gene_set_gl:
+                        empty_df = pd.DataFrame(columns=[gene_col])
+                        sheet_label_gl = sheet_name_gl[:31]
+                        empty_df.to_excel(writer, sheet_name=sheet_label_gl, index=False)
+                        summary_rows.append({"category": sheet_name_gl, "count": 0})
+                        continue
+
+                    # Include ALL event rows where the gene matches (by GeneID)
+                    sub_a_gl = df_a_gl[df_a_gl[_gl_id_col].isin(gene_set_gl)].copy() if has_a_gl and _gl_id_col in df_a_gl.columns else pd.DataFrame()
+                    sub_b_gl = df_b_gl[df_b_gl[_gl_id_col].isin(gene_set_gl)].copy() if has_b_gl and _gl_id_col in df_b_gl.columns else pd.DataFrame()
+
+                    # Add source condition column and concatenate
+                    if len(sub_a_gl) > 0:
+                        sub_a_gl["_source_condition"] = label_a
+                    if len(sub_b_gl) > 0:
+                        sub_b_gl["_source_condition"] = label_b
+
+                    if len(sub_a_gl) > 0 and len(sub_b_gl) > 0:
+                        merged_gl = pd.concat([sub_a_gl, sub_b_gl], ignore_index=True)
+                    elif len(sub_a_gl) > 0:
+                        merged_gl = sub_a_gl
+                    else:
+                        merged_gl = sub_b_gl
+
+                    sheet_label_gl = sheet_name_gl[:31]
+                    merged_gl.to_excel(writer, sheet_name=sheet_label_gl, index=False)
+                    n_genes = len(gene_set_gl)
+                    summary_rows.append({"category": sheet_name_gl,
+                                         "count": f"{n_genes} genes / {len(merged_gl)} events"})
+                    print(f"   {sheet_label_gl}: {n_genes:,} genes, {len(merged_gl):,} events")
+
+            # -------------------------------------------------------
+            # Summary sheet
+            # -------------------------------------------------------
+            if summary_rows:
+                summary_df = pd.DataFrame(summary_rows)
+                summary_df.to_excel(writer, sheet_name="Summary", index=False)
+
+        print(f"  Saved: {wb_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -3901,7 +5203,9 @@ def run_gprofiler_ora(condition_results, condition_labels, outdir,
                                 _force_enrichr=True)
 
     outdir = Path(outdir)
-    ora_dir = outdir / "go_ora"
+    # Use separate subdir in dual mode to avoid collisions with Enrichr output
+    ora_subdir = "go_ora_gprofiler" if ORA_METHOD == "both" else "go_ora"
+    ora_dir = outdir / ora_subdir
     ora_dir.mkdir(parents=True, exist_ok=True)
 
     if DESEQ2_COLS_map is None:
@@ -4068,6 +5372,7 @@ def run_go_enrichment(condition_results, condition_labels, outdir,
     dict  :  go_results[cond_name] = {"up": DataFrame, "down": DataFrame}
     """
     # Route to g:Profiler if configured (unless forced to Enrichr by fallback)
+    # "both" mode: main() calls each function directly, so falls through to Enrichr
     if ORA_METHOD == "gprofiler" and not _force_enrichr:
         return run_gprofiler_ora(condition_results, condition_labels, outdir,
                                 _best_gene_key_fn=_best_gene_key_fn,
@@ -4081,7 +5386,9 @@ def run_go_enrichment(condition_results, condition_labels, outdir,
         return {}
 
     outdir = Path(outdir)
-    ora_dir = outdir / "go_ora"
+    # Use separate subdir in dual mode to avoid collisions with g:Profiler output
+    ora_subdir = "go_ora_enrichr" if ORA_METHOD == "both" else "go_ora"
+    ora_dir = outdir / ora_subdir
     ora_dir.mkdir(parents=True, exist_ok=True)
 
     if DESEQ2_COLS_map is None:
@@ -4239,7 +5546,8 @@ def run_go_enrichment(condition_results, condition_labels, outdir,
 
 
 def go_enrichment_combined_plot(go_results, condition_labels, outdir,
-                                FIG_FORMAT_override=None, FIG_DPI_override=None):
+                                FIG_FORMAT_override=None, FIG_DPI_override=None,
+                                filename_suffix=""):
     """Create a two-panel dot plot (up / down) for each condition.
 
     Parameters
@@ -4274,7 +5582,9 @@ def go_enrichment_combined_plot(go_results, condition_labels, outdir,
             continue
 
         fig, axes = plt.subplots(1, 2, figsize=(20, 12))
-        fig.suptitle(f"GO/Pathway Enrichment \u2014 {cond_label}",
+        method_label = filename_suffix.replace("_", " ").strip().title()
+        title_extra = f" ({method_label})" if method_label else ""
+        fig.suptitle(f"GO/Pathway Enrichment \u2014 {cond_label}{title_extra}",
                      fontsize=14, fontweight="bold", y=0.98)
 
         for ax, df, title in [(axes[0], up_df, "Upregulated"),
@@ -4397,13 +5707,13 @@ def go_enrichment_combined_plot(go_results, condition_labels, outdir,
 
         plt.tight_layout(rect=[0, 0.06, 1, 0.95])
 
-        fig_path = outdir / f"go_enrichment_combined_{cond_name}.{fmt}"
+        fig_path = outdir / f"go_enrichment_combined_{cond_name}{filename_suffix}.{fmt}"
         fig.savefig(fig_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved: {fig_path.name}")
 
 
-def export_go_prism(go_results, condition_labels, prism_dir):
+def export_go_prism(go_results, condition_labels, prism_dir, filename_suffix=""):
     """Export GO ORA results to GraphPad Prism .pzfx files.
 
     Parameters
@@ -4542,7 +5852,7 @@ def export_go_prism(go_results, condition_labels, prism_dir):
             tables_added += 1
 
         if tables_added > 0:
-            pzfx_path = prism_dir / f"GO_ORA_{cond_name}.pzfx"
+            pzfx_path = prism_dir / f"GO_ORA_{cond_name}{filename_suffix}.pzfx"
             _save_prism_xml(root, pzfx_path)
             print(f"  Saved Prism: {pzfx_path.name}")
         else:
@@ -5132,9 +6442,11 @@ def volcano_plot_labeled(deseq2_all, outdir, label="", suffix="",
     data = deseq2_all.dropna(subset=[padj_col_name, log2fc_col]).copy()
     data["_neg_log10_padj"] = -np.log10(data[padj_col_name].clip(lower=1e-300))
 
-    # Classify significance
-    cond_up = (data[padj_col_name] < PADJ_CUTOFF) & (data[log2fc_col] >= LOG2FC_CUTOFF)
-    cond_dn = (data[padj_col_name] < PADJ_CUTOFF) & (data[log2fc_col] <= -LOG2FC_CUTOFF)
+    # Classify significance — include baseMean filter to match actual DEG counts
+    basemean_col = DESEQ2_COLS.get("basemean", "baseMean")
+    basemean_ok = (data[basemean_col] >= BASEMEAN_CUTOFF) if basemean_col in data.columns else True
+    cond_up = (data[padj_col_name] < PADJ_CUTOFF) & (data[log2fc_col] >= LOG2FC_CUTOFF) & basemean_ok
+    cond_dn = (data[padj_col_name] < PADJ_CUTOFF) & (data[log2fc_col] <= -LOG2FC_CUTOFF) & basemean_ok
     data["_status"] = np.select([cond_up, cond_dn], ["Up", "Down"], default="NS")
 
     color_map = {"Up": COLOR_UP, "Down": COLOR_DOWN, "NS": COLOR_NS}
@@ -5144,10 +6456,11 @@ def volcano_plot_labeled(deseq2_all, outdir, label="", suffix="",
 
     for status in ["NS", "Down", "Up"]:
         subset = data[data["_status"] == status]
+        lbl = "NS" if status == "NS" else f"{status} ({len(subset):,})"
         ax.scatter(
             subset[log2fc_col], subset["_neg_log10_padj"],
             c=color_map[status], s=8, alpha=0.5, edgecolors="none",
-            label=f"{status} ({len(subset):,})", rasterized=True,
+            label=lbl, rasterized=True,
         )
 
     # Threshold lines
@@ -5158,7 +6471,7 @@ def volcano_plot_labeled(deseq2_all, outdir, label="", suffix="",
     # Count box
     n_up = int((data["_status"] == "Up").sum())
     n_down = int((data["_status"] == "Down").sum())
-    add_count_box(ax, n_up, n_down, n_up + n_down, position="upper left")
+    add_count_box(ax, n_up, n_down, n_up + n_down, position="lower left")
 
     # --- Identify genes to label ---
     sig_mask = data["_status"].isin(["Up", "Down"])
@@ -5168,22 +6481,8 @@ def volcano_plot_labeled(deseq2_all, outdir, label="", suffix="",
     if len(sig_data) > 0:
         top10 = sig_data.nsmallest(10, padj_col_name)
 
-    # Genes of interest present in the data
-    goi_mask = data[gene_col].isin(genes_of_interest) if gene_col in data.columns else pd.Series(False, index=data.index)
-    goi_data = data[goi_mask]
-
-    # Plot genes of interest with a distinct diamond marker
-    if len(goi_data) > 0:
-        ax.scatter(
-            goi_data[log2fc_col], goi_data["_neg_log10_padj"],
-            c="#D55E00", marker="D", s=80, edgecolors="black", linewidths=0.8,
-            zorder=5, label="Genes of Interest",
-        )
-
     # --- Label placement with simple overlap avoidance ---
-    label_rows = pd.concat([top10, goi_data]).drop_duplicates(
-        subset=[gene_col] if gene_col in data.columns else None
-    )
+    label_rows = top10.copy() if len(sig_data) > 0 else pd.DataFrame()
 
     placed_labels = []  # list of (x_text, y_text)
 
@@ -5221,7 +6520,6 @@ def volcano_plot_labeled(deseq2_all, outdir, label="", suffix="",
             gene_name = str(row[gene_col])
             x_data = row[log2fc_col]
             y_data = row["_neg_log10_padj"]
-            is_goi = gene_name in genes_of_interest
 
             x_text, y_text = _find_offset(x_data, y_data, placed_labels)
             placed_labels.append((x_text, y_text))
@@ -5231,18 +6529,17 @@ def volcano_plot_labeled(deseq2_all, outdir, label="", suffix="",
                 xy=(x_data, y_data),
                 xytext=(x_text, y_text),
                 fontsize=8,
-                fontweight="bold" if is_goi else "normal",
-                color="#D55E00" if is_goi else "black",
+                color="black",
                 arrowprops=dict(
                     arrowstyle="-|>",
-                    color="#D55E00" if is_goi else "grey",
+                    color="grey",
                     lw=0.8,
                     connectionstyle="arc3,rad=0.15",
                 ),
                 bbox=dict(
                     boxstyle="round,pad=0.2",
                     facecolor="white",
-                    edgecolor="#D55E00" if is_goi else "grey",
+                    edgecolor="grey",
                     alpha=0.85,
                 ),
                 zorder=6,
@@ -5253,7 +6550,7 @@ def volcano_plot_labeled(deseq2_all, outdir, label="", suffix="",
     ax.set_ylabel("$-$log$_{10}$ (adjusted p-value)", fontsize=12)
     title_label = f" — {label}" if label else ""
     ax.set_title(f"Volcano Plot (Labeled){title_label}", fontsize=14)
-    ax.legend(loc="upper right", frameon=True, fontsize=9, markerscale=2)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, fontsize=9, markerscale=2)
 
     fname = f"volcano_plot_labeled{suffix}.{FIG_FORMAT}"
     outpath = outdir / fname
@@ -6104,146 +7401,416 @@ def export_prism_files(condition_results, condition_labels, outdir, gsea_results
     print(f"  Prism export complete: {len(list(prism_dir.glob('*.pzfx')))} files in {prism_dir}")
 
 
-def generate_powerpoint_report(condition_results, condition_labels, outdir):
-    """Generate PowerPoint presentation with all figures using python-pptx.
+def export_unfiltered_merged(condition_results, condition_labels, outdir):
+    """Export unfiltered (all genes/events) merged across conditions to Excel.
 
-    Uses padj <= 0.01 threshold for filtering.
-    All images fit within slide margins with proper scaling.
+    Keeps ALL native columns from each condition's raw data, suffixed with the
+    condition short name.  Merge keys (gene_id/gene_name for DESeq2; gene info +
+    genomic coordinates for rMATS) are shared columns, not duplicated.
+
+    Creates a multi-sheet XLSX with:
+      - DESeq2_All_Conditions: outer merge of all genes across all conditions
+      - DESeq2_{labelA}_vs_{labelB}: pairwise outer merges for each pair
+      - rMATS_{event_type}: outer merge of splicing events per event type
+    """
+    from itertools import combinations
+    from pathlib import Path
+
+    outdir = Path(outdir)
+    xlsx_path = outdir / "Unfiltered_All_Conditions_Merged.xlsx"
+    print(f"\n-- Exporting Unfiltered Merged Results --")
+    print(f"   Output: {xlsx_path}")
+
+    names = list(condition_results.keys())
+    id_col   = DESEQ2_COLS["gene_id"]
+    name_col = DESEQ2_COLS["gene_name"]
+
+    rmats_gid  = RMATS_COLS["gene_id"]
+    rmats_gn   = RMATS_COLS["gene_name"]
+
+    def _short(label):
+        parts = label.split(" vs ")
+        return parts[0].replace(" ", "_") if parts else label.replace(" ", "_")
+
+    def _deseq2_key(df):
+        if name_col in df.columns and df[name_col].notna().sum() > 0:
+            return name_col
+        return id_col
+
+    # --- Build per-condition DESeq2 slices with ALL columns ---
+    deseq2_slices = {}
+    for cname in names:
+        raw = condition_results[cname].get("deseq2_raw", pd.DataFrame())
+        if raw.empty:
+            continue
+        key = _deseq2_key(raw)
+        short = _short(condition_labels[cname])
+        df = raw.copy()
+        # Identify merge-key columns (shared, not suffixed)
+        key_cols = [c for c in [id_col, name_col] if c in df.columns]
+        # Suffix all non-key columns with condition short name
+        rename = {}
+        for c in df.columns:
+            if c not in key_cols:
+                rename[c] = f"{short}_{c}"
+        df = df.rename(columns=rename)
+        deseq2_slices[cname] = (df, key, short)
+
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+
+        # ---- Sheet 1: DESeq2_All_Conditions (outer merge) ----
+        if deseq2_slices:
+            merged = None
+            for cname in names:
+                if cname not in deseq2_slices:
+                    continue
+                slice_df, key, short = deseq2_slices[cname]
+                if merged is None:
+                    merged = slice_df.copy()
+                else:
+                    merge_on = [c for c in [key] if c in merged.columns and c in slice_df.columns]
+                    right_drop = [c for c in [id_col, name_col]
+                                  if c in slice_df.columns and c in merged.columns and c not in merge_on]
+                    merged = merged.merge(
+                        slice_df.drop(columns=right_drop, errors="ignore"),
+                        on=merge_on, how="outer")
+
+            if merged is not None and not merged.empty:
+                merged.to_excel(writer, sheet_name="DESeq2_All_Conditions", index=False)
+                print(f"   DESeq2_All_Conditions: {len(merged):,} genes x {len(merged.columns)} cols")
+
+        # ---- Sheets 2+: DESeq2 pairwise ----
+        for cA, cB in combinations(names, 2):
+            if cA not in deseq2_slices or cB not in deseq2_slices:
+                continue
+            slA, keyA, shortA = deseq2_slices[cA]
+            slB, keyB, shortB = deseq2_slices[cB]
+            merge_on = [c for c in [keyA] if c in slA.columns and c in slB.columns]
+            right_drop = [c for c in [id_col, name_col]
+                          if c in slB.columns and c in slA.columns and c not in merge_on]
+            pair_df = slA.merge(
+                slB.drop(columns=right_drop, errors="ignore"),
+                on=merge_on, how="outer")
+            sheet = f"DESeq2_{shortA}_vs_{shortB}"[:31]
+            pair_df.to_excel(writer, sheet_name=sheet, index=False)
+            print(f"   {sheet}: {len(pair_df):,} genes")
+
+        # ---- rMATS sheets: one per event type, merged across conditions ----
+        # Coordinate columns that uniquely identify each splicing event
+        _coord_cols = {
+            "SE": ["chr", "strand", "exonStart_0base", "exonEnd",
+                    "upstreamES", "upstreamEE", "downstreamES", "downstreamEE"],
+            "A3SS": ["chr", "strand", "longExonStart_0base", "longExonEnd",
+                     "shortES", "shortEE", "flankingES", "flankingEE"],
+            "A5SS": ["chr", "strand", "longExonStart_0base", "longExonEnd",
+                     "shortES", "shortEE", "flankingES", "flankingEE"],
+            "RI": ["chr", "strand", "riExonStart_0base", "riExonEnd",
+                   "upstreamES", "upstreamEE", "downstreamES", "downstreamEE"],
+            "MXE": ["chr", "strand", "1stExonStart_0base", "1stExonEnd",
+                    "2ndExonStart_0base", "2ndExonEnd",
+                    "upstreamES", "upstreamEE", "downstreamES", "downstreamEE"],
+        }
+        for et in RMATS_EVENT_TYPES:
+            merged_rmats = None
+            coord = _coord_cols.get(et, [])
+            for cname in names:
+                rmats_raw = condition_results[cname].get("rmats_raw", {})
+                raw = rmats_raw.get(et, pd.DataFrame())
+                if raw.empty:
+                    continue
+                short = _short(condition_labels[cname])
+                df = raw.copy()
+                # Merge keys: gene info + coordinates (shared, not suffixed)
+                id_keys = [c for c in [rmats_gid, rmats_gn] if c in df.columns]
+                coord_keys = [c for c in coord if c in df.columns]
+                shared_keys = id_keys + coord_keys
+                # Drop the rMATS "ID" column (run-specific, not meaningful across conditions)
+                if "ID" in df.columns:
+                    df = df.drop(columns=["ID"])
+                # Suffix all non-shared columns
+                rename = {}
+                for c in df.columns:
+                    if c not in shared_keys:
+                        rename[c] = f"{short}_{c}"
+                df = df.rename(columns=rename)
+
+                if merged_rmats is None:
+                    merged_rmats = df
+                else:
+                    merge_on = [c for c in shared_keys
+                                if c in merged_rmats.columns and c in df.columns]
+                    if not merge_on:
+                        continue
+                    right_drop = [c for c in shared_keys
+                                  if c in df.columns and c in merged_rmats.columns
+                                  and c not in merge_on]
+                    merged_rmats = merged_rmats.merge(
+                        df.drop(columns=right_drop, errors="ignore"),
+                        on=merge_on, how="outer")
+
+            if merged_rmats is not None and not merged_rmats.empty:
+                # Excel row limit: 1,048,576. Warn if close.
+                if len(merged_rmats) > 1_048_000:
+                    print(f"   WARNING: rMATS_{et} has {len(merged_rmats):,} rows — "
+                          f"near Excel limit, truncating to 1,048,000")
+                    merged_rmats = merged_rmats.head(1_048_000)
+                sheet = f"rMATS_{et}"[:31]
+                merged_rmats.to_excel(writer, sheet_name=sheet, index=False)
+                print(f"   {sheet}: {len(merged_rmats):,} events x {len(merged_rmats.columns)} cols")
+
+    print(f"   Saved: {xlsx_path}")
+
+
+def generate_powerpoint_report(condition_results, condition_labels, outdir):
+    """Generate a professional PowerPoint report with all analysis figures.
+
+    Searches per-condition figures in outdir/<cond>/figures/ and cross-condition
+    figures in outdir/cross_condition/figures/ and outdir/gsea_results/.
     """
     try:
         from pptx import Presentation
-        from pptx.util import Inches, Pt
+        from pptx.util import Inches, Pt, Emu
+        from pptx.dml.color import RGBColor
+        from pptx.enum.text import PP_ALIGN
     except ImportError:
         print("  WARNING: python-pptx not installed, skipping PowerPoint generation")
         print("  Install with: pip install python-pptx")
         return
 
+    from datetime import date
+    from PIL import Image
+
     print("\n-- Generating PowerPoint Report --")
 
+    DARK_BLUE = RGBColor(0x1B, 0x3A, 0x5C)
+    WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+    SLIDE_W = Inches(13.333)
+    SLIDE_H = Inches(7.5)
+
     prs = Presentation()
-    prs.slide_width = Inches(10)
-    prs.slide_height = Inches(7.5)
+    prs.slide_width = SLIDE_W
+    prs.slide_height = SLIDE_H
 
-    # Title slide
-    title_slide_layout = prs.slide_layouts[0]
-    slide = prs.slides.add_slide(title_slide_layout)
-    title = slide.shapes.title
-    subtitle = slide.placeholders[1]
-    title.text = "RNA-seq Analysis Report"
-    subtitle.text = f"DESeq2 & rMATS Pipeline\n{len(condition_results)} Conditions"
-
-    # Helper to add image slide
-    def add_image_slide(title_text, image_path):
-        """Add a slide with title and centered image that fits margins."""
-        blank_layout = prs.slide_layouts[6]  # Blank layout
-        slide = prs.slides.add_slide(blank_layout)
-
-        # Add title
-        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.5))
-        title_frame = title_box.text_frame
-        title_frame.text = title_text
-        title_frame.paragraphs[0].font.size = Pt(24)
-        title_frame.paragraphs[0].font.bold = True
-
-        # Add image with proper scaling
-        if image_path.exists():
-            try:
-                # Maximum dimensions (leave margins)
-                max_width = Inches(9)
-                max_height = Inches(6)
-                left = Inches(0.5)
-                top = Inches(1.0)
-
-                # Add picture with scaling
-                pic = slide.shapes.add_picture(
-                    str(image_path),
-                    left, top,
-                    width=max_width,
-                    height=max_height
-                )
-                # Maintain aspect ratio
-                if pic.width > max_width:
-                    pic.width = max_width
-                if pic.height > max_height:
-                    pic.height = max_height
-
-            except Exception as e:
-                print(f"    WARNING: Could not add image {image_path.name}: {e}")
-        else:
-            print(f"    WARNING: Image not found: {image_path.name}")
-
-    # Add overview slide
-    blank_layout = prs.slide_layouts[6]
-    slide = prs.slides.add_slide(blank_layout)
-    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.5))
-    title_frame = title_box.text_frame
-    title_frame.text = "Analysis Overview"
-    title_frame.paragraphs[0].font.size = Pt(24)
-    title_frame.paragraphs[0].font.bold = True
-
-    # Summary stats
-    content_box = slide.shapes.add_textbox(Inches(1), Inches(1.5), Inches(8), Inches(5))
-    content_frame = content_box.text_frame
-    content_frame.word_wrap = True
-
-    for cond_name, data in condition_results.items():
-        cond_label = condition_labels.get(cond_name, cond_name)
-        deg_count = len(data["deseq2_filtered"]["all_genes"])
-        deg_up = int((data["deseq2_filtered"]["all_genes"]["direction"] == "up").sum()) if "direction" in data["deseq2_filtered"]["all_genes"].columns else 0
-        deg_down = int((data["deseq2_filtered"]["all_genes"]["direction"] == "down").sum()) if "direction" in data["deseq2_filtered"]["all_genes"].columns else 0
-        splicing_count = sum(len(df) for df in data["rmats_filtered"].values())
-
-        p = content_frame.add_paragraph()
-        p.text = f"{cond_label}:"
-        p.font.size = Pt(16)
+    # ── helper: section header slide ──────────────────────────────────────
+    def add_section_slide(title_text, subtitle_text=""):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+        # dark blue rectangle covering full slide
+        from pptx.util import Emu as _Emu
+        shape = slide.shapes.add_shape(
+            1, _Emu(0), _Emu(0), SLIDE_W, SLIDE_H  # MSO_SHAPE.RECTANGLE = 1
+        )
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = DARK_BLUE
+        shape.line.fill.background()
+        # title
+        tx = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11), Inches(1.2))
+        p = tx.text_frame.paragraphs[0]
+        p.text = title_text
+        p.font.size = Pt(40)
         p.font.bold = True
+        p.font.color.rgb = WHITE
+        p.alignment = PP_ALIGN.LEFT
+        # subtitle
+        if subtitle_text:
+            tx2 = slide.shapes.add_textbox(Inches(1), Inches(3.8), Inches(11), Inches(0.8))
+            p2 = tx2.text_frame.paragraphs[0]
+            p2.text = subtitle_text
+            p2.font.size = Pt(22)
+            p2.font.color.rgb = WHITE
+            p2.alignment = PP_ALIGN.LEFT
+        return slide
 
-        p = content_frame.add_paragraph()
-        p.text = f"  DEGs: {deg_count} (Up: {deg_up}, Down: {deg_down})"
-        p.font.size = Pt(14)
-        p.level = 1
+    # ── helper: image slide ───────────────────────────────────────────────
+    def add_image_slide(title_text, image_path):
+        if not image_path.exists():
+            print(f"    WARNING: missing {image_path.name}, skipping")
+            return
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        # title bar
+        bar = slide.shapes.add_shape(1, Emu(0), Emu(0), SLIDE_W, Inches(0.9))
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = DARK_BLUE
+        bar.line.fill.background()
+        tx = slide.shapes.add_textbox(Inches(0.5), Inches(0.1), Inches(12), Inches(0.7))
+        p = tx.text_frame.paragraphs[0]
+        p.text = title_text
+        p.font.size = Pt(22)
+        p.font.bold = True
+        p.font.color.rgb = WHITE
+        # image — scale to fit remaining area
+        try:
+            img = Image.open(image_path)
+            iw, ih = img.size
+            img.close()
+            max_w = Inches(12.333)  # 0.5" margins each side
+            max_h = Inches(6.2)     # below title bar
+            scale = min(max_w / Emu(int(iw * 914400 / 96)),
+                        max_h / Emu(int(ih * 914400 / 96)))
+            w = int(iw * 914400 / 96 * min(scale, 1.0))
+            h = int(ih * 914400 / 96 * min(scale, 1.0))
+            left = int((SLIDE_W - w) / 2)
+            top = Inches(1.0) + int((max_h - h) / 2)
+            slide.shapes.add_picture(str(image_path), left, top, w, h)
+        except Exception as e:
+            print(f"    WARNING: could not add {image_path.name}: {e}")
 
-        p = content_frame.add_paragraph()
-        p.text = f"  Splicing events: {splicing_count}"
-        p.font.size = Pt(14)
-        p.level = 1
+    # ══════════════════════════════════════════════════════════════════════
+    # TITLE SLIDE
+    # ══════════════════════════════════════════════════════════════════════
+    cond_names = list(condition_results.keys())
+    n_conds = len(cond_names)
+    _ppt_filters = (f"padj < {PADJ_CUTOFF}, |log2FC| \u2265 {LOG2FC_CUTOFF}, "
+                     f"baseMean \u2265 {BASEMEAN_CUTOFF}")
+    if RMATS_DUAL_FILTER:
+        _ppt_filters += (f"  |  rMATS: FDR < {RMATS_FDR_CUTOFF} & P < {RMATS_PVAL_CUTOFF}, "
+                          f"|dPSI| \u2265 {INCLEVEL_DIFF_CUTOFF}")
+    else:
+        _ppt_fdr_or_p = f"FDR < {RMATS_FDR_CUTOFF}" if USE_FDR else f"P < {RMATS_PVAL_CUTOFF}"
+        _ppt_filters += f"  |  rMATS: {_ppt_fdr_or_p}, |dPSI| \u2265 {INCLEVEL_DIFF_CUTOFF}"
+    add_section_slide(
+        "RNA-seq Analysis Report",
+        f"{n_conds} conditions  |  {_ppt_filters}  |  {date.today().strftime('%B %d, %Y')}"
+    )
 
-        content_frame.add_paragraph()  # Blank line
+    # ══════════════════════════════════════════════════════════════════════
+    # OVERVIEW SLIDE
+    # ══════════════════════════════════════════════════════════════════════
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    bar = slide.shapes.add_shape(1, Emu(0), Emu(0), SLIDE_W, Inches(0.9))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = DARK_BLUE
+    bar.line.fill.background()
+    tx = slide.shapes.add_textbox(Inches(0.5), Inches(0.1), Inches(12), Inches(0.7))
+    p = tx.text_frame.paragraphs[0]
+    p.text = "Analysis Overview"
+    p.font.size = Pt(28)
+    p.font.bold = True
+    p.font.color.rgb = WHITE
 
-    # Collect all figure files
-    figures_dir = outdir / "figures"
-    if not figures_dir.exists():
-        figures_dir = outdir
-
-    figure_files = list(figures_dir.glob(f"*.{FIG_FORMAT}"))
-
-    # Per-condition figures
+    body = slide.shapes.add_textbox(Inches(1), Inches(1.4), Inches(11), Inches(5.5))
+    tf = body.text_frame
+    tf.word_wrap = True
     for cond_name, data in condition_results.items():
-        cond_label = condition_labels.get(cond_name, cond_name)
+        label = condition_labels.get(cond_name, cond_name)
+        deg_df = data["deseq2_filtered"]["all_genes"]
+        n_deg = len(deg_df)
+        n_up = int((deg_df["direction"] == "up").sum()) if "direction" in deg_df.columns else 0
+        n_down = int((deg_df["direction"] == "down").sum()) if "direction" in deg_df.columns else 0
+        n_splice = sum(len(df) for df in data["rmats_filtered"].values())
+        p = tf.add_paragraph()
+        p.text = label
+        p.font.size = Pt(20)
+        p.font.bold = True
+        p.font.color.rgb = DARK_BLUE
+        p = tf.add_paragraph()
+        p.text = f"    DEGs: {n_deg}  ({n_up} up / {n_down} down)    |    Splicing events: {n_splice}"
+        p.font.size = Pt(16)
+        tf.add_paragraph()  # spacer
 
-        # Section title slide
-        title_slide = prs.slides.add_slide(prs.slide_layouts[0])
-        title_slide.shapes.title.text = cond_label
-        title_slide.placeholders[1].text = "Condition-Specific Analysis"
+    # ══════════════════════════════════════════════════════════════════════
+    # PER-CONDITION SECTIONS
+    # ══════════════════════════════════════════════════════════════════════
+    per_cond_figures = [
+        ("Volcano Plot", "volcano_plot.png"),
+        ("Volcano Plot (labeled)", "volcano_plot_labeled.png"),
+        ("MA Plot", "ma_plot.png"),
+        ("Top DEGs (lollipop)", "top_genes_lollipop.png"),
+        ("P-value Histogram", "pvalue_histogram.png"),
+        ("Biotype Distribution", "biotype_distribution.png"),
+        ("Biotype Direction Chart", "biotype_direction_chart.png"),
+        ("Biotype Enrichment", "biotype_enrichment.png"),
+        ("Non-coding Volcano", "volcano_plot_labeled_non_protein_coding.png"),
+        ("Non-coding MA Plot", "ma_plot_non_protein_coding.png"),
+        ("Non-coding Biotype Distribution", "biotype_distribution_non_protein_coding.png"),
+        ("Expression Rank Plot", "expression_rank_plot.png"),
+        ("Splicing Event Summary", "rmats_event_type_summary.png"),
+        ("Splicing dPSI Distribution", "rmats_dpsi_distribution.png"),
+        ("Splicing All Events Scatter", "rmats_all_events_scatter.png"),
+        ("SE Scatter", "rmats_SE_scatter.png"),
+        ("SE PSI Scatter", "rmats_SE_psi_scatter.png"),
+        ("A3SS Scatter", "rmats_A3SS_scatter.png"),
+        ("A5SS Scatter", "rmats_A5SS_scatter.png"),
+        ("RI Scatter", "rmats_RI_scatter.png"),
+        ("MXE Scatter", "rmats_MXE_scatter.png"),
+    ]
 
-        # Find figures for this condition
-        cond_figs = [f for f in figure_files if cond_name.lower() in f.name.lower()]
+    for cond_name in cond_names:
+        label = condition_labels.get(cond_name, cond_name)
+        fig_dir = outdir / cond_name / "figures"
+        add_section_slide(label, "Condition-Specific Analysis")
+        for slide_title, fname in per_cond_figures:
+            path = fig_dir / fname
+            if path.exists():
+                add_image_slide(f"{label} \u2014 {slide_title}", path)
 
-        for fig_path in sorted(cond_figs)[:10]:  # Limit to 10 per condition
-            add_image_slide(f"{cond_label}: {fig_path.stem}", fig_path)
+    # ══════════════════════════════════════════════════════════════════════
+    # CROSS-CONDITION SECTION
+    # ══════════════════════════════════════════════════════════════════════
+    cross_dir = outdir / "cross_condition" / "figures"
+    gsea_dir = outdir / "gsea_results"
 
-    # Cross-condition figures
-    cross_figs = [f for f in figure_files if "cross" in f.name.lower() or "venn" in f.name.lower() or "heatmap" in f.name.lower()]
+    cross_figures = [
+        ("DEG Counts Overview", "deseq2_de_counts_overview.png"),
+        ("Analysis Summary Dashboard", "analysis_summary_dashboard.png"),
+        ("Venn \u2014 All Significant Genes", "venn_all_sig_genes.png"),
+        ("Venn \u2014 Upregulated", "venn_upregulated.png"),
+        ("Venn \u2014 Downregulated", "venn_downregulated.png"),
+        ("UpSet \u2014 All Significant", "deseq2_upset_all_sig.png"),
+        ("UpSet \u2014 Up", "deseq2_upset_up.png"),
+        ("UpSet \u2014 Down", "deseq2_upset_down.png"),
+        ("Direction Concordance Heatmap", "direction_concordance_heatmap.png"),
+        ("Direction Concordance Summary", "direction_concordance_summary.png"),
+        ("Pairwise log2FC Scatter", "pairwise_log2fc_scatter.png"),
+        ("log2FC Heatmap", "log2fc_heatmap.png"),
+        ("log2FC vs dPSI Scatter", "log2fc_vs_dpsi_scatter.png"),
+        ("Cross-Condition Biotype Comparison", "cross_condition_biotype_comparison.png"),
+        ("Cross-Condition Biotype Direction", "cross_condition_biotype_direction.png"),
+        ("rMATS Event Count Comparison", "rmats_event_count_comparison.png"),
+        ("rMATS Direction Concordance", "rmats_direction_concordance.png"),
+        ("rMATS UpSet \u2014 SE", "rmats_upset_SE.png"),
+        ("rMATS UpSet \u2014 Genes", "rmats_upset_genes.png"),
+        ("Pairwise dPSI Scatter", "pairwise_dpsi_scatter.png"),
+    ]
 
-    if cross_figs:
-        title_slide = prs.slides.add_slide(prs.slide_layouts[0])
-        title_slide.shapes.title.text = "Cross-Condition Analysis"
-        title_slide.placeholders[1].text = "Comparative Analyses"
+    add_section_slide("Cross-Condition Analysis", "Comparative & Integrative Results")
 
-        for fig_path in sorted(cross_figs)[:15]:
-            add_image_slide(f"Cross-Condition: {fig_path.stem}", fig_path)
+    for slide_title, fname in cross_figures:
+        path = cross_dir / fname
+        if path.exists():
+            add_image_slide(slide_title, path)
 
-    # Save presentation
+    # Pairwise DEG venns
+    for png in sorted(cross_dir.glob("venn_deg_*.png")) if cross_dir.exists() else []:
+        add_image_slide(f"Pairwise DEG Venn \u2014 {png.stem.replace('venn_deg_', '')}", png)
+
+    # Pairwise splicing venns
+    for png in sorted(cross_dir.glob("venn_splicing_*.png")) if cross_dir.exists() else []:
+        parts = png.stem.replace("venn_splicing_", "").split("_", 1)
+        add_image_slide(f"Splicing Venn ({parts[0]}) \u2014 {parts[1] if len(parts)>1 else ''}", png)
+
+    # DESeq2 vs rMATS venns
+    for png in sorted(cross_dir.glob("deseq2_vs_rmats_venn_*.png")) if cross_dir.exists() else []:
+        cname = png.stem.replace("deseq2_vs_rmats_venn_", "")
+        label = condition_labels.get(cname, cname)
+        add_image_slide(f"DESeq2 vs rMATS \u2014 {label}", png)
+
+    # ── ORA enrichment plots (from cross_condition/figures) ───────────
+    add_section_slide("Functional Enrichment", "ORA (enrichr & g:Profiler) and GSEA")
+
+    for png in sorted(cross_dir.glob("go_enrichment_combined_*.png")) if cross_dir.exists() else []:
+        parts = png.stem.replace("go_enrichment_combined_", "")
+        add_image_slide(f"ORA \u2014 {parts}", png)
+
+    # ── GSEA combined plots (from gsea_results/) ─────────────────────
+    if gsea_dir.exists():
+        for png in sorted(gsea_dir.glob("gsea_combined_*.png")):
+            cname = png.stem.replace("gsea_combined_", "")
+            label = condition_labels.get(cname, cname)
+            add_image_slide(f"GSEA Combined \u2014 {label}", png)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SAVE
+    # ══════════════════════════════════════════════════════════════════════
     pptx_path = outdir / "RNA-seq_Analysis_Report.pptx"
     prs.save(str(pptx_path))
     print(f"  PowerPoint saved: {pptx_path} ({len(prs.slides)} slides)")
@@ -6457,6 +8024,18 @@ def main():
     else:
         print("[INFO] No counts file — skipping PCA, correlation heatmap, top DEG heatmap")
 
+    # Load RBP annotations if provided
+    rbp_annotations = {}
+    if RBP_FILE:
+        print("\n-- Loading RBP Annotations --")
+        try:
+            rbp_annotations = load_rbp_annotations(RBP_FILE)
+        except Exception as e:
+            print(f"  WARNING: Failed to load RBP annotations: {e}")
+            rbp_annotations = {}
+    else:
+        print("[INFO] No RBP_FILE — skipping RBP annotation")
+
     # Per-condition PCA files (from WSF output, if provided)
     for cond in CONDITIONS:
         if cond.get("pca_file"):
@@ -6491,6 +8070,15 @@ def main():
         if DESEQ2_COLS.get("gene_name", "") not in deseq2_raw.columns:
             print(f"  NOTE: No gene name column found — attempting Ensembl → gene name lookup")
         deseq2_raw = _enrich_with_gene_names(deseq2_raw, f"DESeq2 ({cond_label})")
+        deseq2_raw = _reassign_biotypes_from_mygene(deseq2_raw, f"DESeq2 ({cond_label})")
+
+        # RBP annotation on raw data (so columns propagate to all exports)
+        if rbp_annotations:
+            gene_col_rbp = DESEQ2_COLS.get("gene_name", "")
+            if gene_col_rbp and gene_col_rbp in deseq2_raw.columns:
+                print(f"\n-- RBP Annotation [{cond_label}] --")
+                deseq2_raw = annotate_rbps(deseq2_raw, rbp_annotations,
+                                           gene_col=gene_col_rbp)
 
         # Biotype passes
         biotype_passes = [("All Genes", None, "")]
@@ -6549,6 +8137,16 @@ def main():
 
             total_sig = sum(filtered_counts.values())
             print(f"  TOTAL significant events: {total_sig:,}")
+
+            # RBP annotation on filtered rMATS data
+            if rbp_annotations:
+                print(f"\n-- RBP Annotation on rMATS [{cond_label}] --")
+                for et in rmats_filtered:
+                    if not rmats_filtered[et].empty:
+                        rmats_filtered[et] = annotate_rbps(
+                            rmats_filtered[et], rbp_annotations,
+                            gene_col=RMATS_COLS["gene_name"]
+                        )
 
             print(f"\n-- Generating rMATS Figures [{cond_label}] --")
             for event_type, df in rmats_raw.items():
@@ -6622,18 +8220,40 @@ def main():
     cross_condition_biotype_comparison(condition_results, condition_labels, comparison_fig_dir)
     cross_condition_biotype_direction(condition_results, condition_labels, comparison_fig_dir)
 
+    # RBP cross-condition analysis (only if RBP annotations were loaded)
+    if rbp_annotations:
+        print("\n-- RBP Cross-Condition Heatmap --")
+        try:
+            rbp_heatmap(condition_results, condition_labels, comparison_fig_dir)
+        except Exception as e:
+            print(f"  WARNING: RBP heatmap failed: {e}")
+
+        print("\n-- RBP Summary Table --")
+        try:
+            rbp_summary_table(condition_results, condition_labels, comparison_dir)
+        except Exception as e:
+            print(f"  WARNING: RBP summary table failed: {e}")
+
     # rMATS comparisons (only conditions with rMATS data)
     rmats_conditions = {name: res for name, res in condition_results.items()
                         if res["rmats_filtered"]}
     if len(rmats_conditions) >= 2:
         print("\n-- rMATS Cross-Condition Venn Diagrams --")
         rmats_cross_condition_venn(rmats_conditions, condition_labels, comparison_fig_dir)
+        try:
+            rmats_cross_condition_venn(rmats_conditions, condition_labels, comparison_fig_dir, match_by="gene")
+        except Exception as e:
+            print(f"  [WARN] Gene-level cross-condition Venns failed: {e}")
 
         print("\n-- rMATS Event Count Comparison --")
         rmats_event_count_comparison(rmats_conditions, condition_labels, comparison_fig_dir)
 
         print("\n-- rMATS UpSet Plots --")
         rmats_upset_plot(rmats_conditions, condition_labels, comparison_fig_dir)
+        try:
+            rmats_upset_plot(rmats_conditions, condition_labels, comparison_fig_dir, match_by="gene")
+        except Exception as e:
+            print(f"  [WARN] Gene-level UpSet plots failed: {e}")
 
         print("\n-- rMATS Direction Concordance --")
         rmats_conc = rmats_direction_concordance(
@@ -6642,9 +8262,48 @@ def main():
 
         print("\n-- Pairwise Splicing Venn Diagrams --")
         pairwise_splicing_venns(rmats_conditions, condition_labels, comparison_fig_dir)
+        try:
+            pairwise_splicing_venns(rmats_conditions, condition_labels, comparison_fig_dir, match_by="gene")
+        except Exception as e:
+            print(f"  [WARN] Gene-level splicing Venns failed: {e}")
 
         print("\n-- Pairwise dPSI Scatter --")
         pairwise_dpsi_scatter(rmats_conditions, condition_labels, comparison_fig_dir)
+        try:
+            pairwise_dpsi_scatter(rmats_conditions, condition_labels, comparison_fig_dir, match_by="gene")
+        except Exception as e:
+            print(f"  [WARN] Gene-level dPSI scatter failed: {e}")
+
+        print("\n-- Directional Splicing Venn Diagrams --")
+        # REMOVED: redundant with pairwise Venns
+        # try:
+        #     rmats_directional_venn_diagrams(rmats_conditions, condition_labels, comparison_fig_dir)
+        # except Exception as e:
+        #     print(f"  [WARN] Event-level directional Venns failed: {e}")
+        # REMOVED: redundant with pairwise Venns
+        # try:
+        #     rmats_directional_venn_diagrams(rmats_conditions, condition_labels, comparison_fig_dir, match_by="gene")
+        # except Exception as e:
+        #     print(f"  [WARN] Gene-level directional Venns failed: {e}")
+
+        print("\n-- rMATS Event Heatmaps --")
+        for _et in ["SE", "RI"]:
+            try:
+                rmats_event_heatmap(rmats_conditions, condition_labels, _et, comparison_fig_dir)
+            except Exception as e:
+                print(f"  WARNING: {_et} event heatmap failed: {e}")
+
+        print("\n-- rMATS Event Type Pie Chart --")
+        try:
+            rmats_event_pie_chart(rmats_conditions, condition_labels, comparison_fig_dir)
+        except Exception as e:
+            print(f"  WARNING: Event type pie chart failed: {e}")
+
+        print("\n-- Pairwise Comparison Workbooks --")
+        try:
+            export_pairwise_workbook(rmats_conditions, condition_labels, comparison_fig_dir)
+        except Exception as e:
+            print(f"  WARNING: Pairwise workbook export failed: {e}")
     else:
         print("\n  Fewer than 2 conditions have rMATS data, skipping rMATS comparisons")
 
@@ -6657,6 +8316,9 @@ def main():
     print("\n-- Exporting Combined Multi-Condition Results --")
     export_combined_results(condition_results, cross_data, comparison_dir)
 
+    # Unfiltered merged overlap Excel (all genes, all conditions)
+    export_unfiltered_merged(condition_results, condition_labels, outdir)
+
     # ===================================================================
     # PHASE 3: GSEA, GO ORA, Prism, PowerPoint, and Validation
     # ===================================================================
@@ -6668,11 +8330,55 @@ def main():
     gsea_results = run_gsea_enrichment(condition_results, condition_labels, outdir)
 
     # GO Over-Representation Analysis
-    go_results = run_go_enrichment(condition_results, condition_labels, outdir,
-                                    _best_gene_key_fn=_best_gene_key, DESEQ2_COLS_map=DESEQ2_COLS)
-    go_enrichment_combined_plot(go_results, condition_labels, outdir / "cross_condition" / "figures",
-                                 FIG_FORMAT_override=FIG_FORMAT, FIG_DPI_override=FIG_DPI)
-    export_go_prism(go_results, condition_labels, outdir / "prism_files")
+    if ORA_METHOD == "both":
+        # Run both Enrichr and g:Profiler side-by-side for comparison
+        print("\n-- Running Enrichr ORA --")
+        try:
+            go_results_enrichr = run_go_enrichment(
+                condition_results, condition_labels, outdir,
+                _best_gene_key_fn=_best_gene_key, DESEQ2_COLS_map=DESEQ2_COLS,
+                _force_enrichr=True)
+        except Exception as e:
+            print(f"  WARNING: Enrichr ORA failed: {e}")
+            go_results_enrichr = {}
+        if go_results_enrichr:
+            go_enrichment_combined_plot(
+                go_results_enrichr, condition_labels,
+                outdir / "cross_condition" / "figures",
+                FIG_FORMAT_override=FIG_FORMAT, FIG_DPI_override=FIG_DPI,
+                filename_suffix="_enrichr")
+            export_go_prism(go_results_enrichr, condition_labels,
+                            outdir / "prism_files", filename_suffix="_enrichr")
+
+        print("\n-- Running g:Profiler ORA --")
+        try:
+            go_results_gprofiler = run_gprofiler_ora(
+                condition_results, condition_labels, outdir,
+                _best_gene_key_fn=_best_gene_key, DESEQ2_COLS_map=DESEQ2_COLS)
+        except Exception as e:
+            print(f"  WARNING: g:Profiler ORA failed: {e}")
+            go_results_gprofiler = {}
+        if go_results_gprofiler:
+            go_enrichment_combined_plot(
+                go_results_gprofiler, condition_labels,
+                outdir / "cross_condition" / "figures",
+                FIG_FORMAT_override=FIG_FORMAT, FIG_DPI_override=FIG_DPI,
+                filename_suffix="_gprofiler")
+            export_go_prism(go_results_gprofiler, condition_labels,
+                            outdir / "prism_files", filename_suffix="_gprofiler")
+
+        # Use Enrichr as primary for summary dashboard (HSCHARME paper standard)
+        go_results = go_results_enrichr if go_results_enrichr else go_results_gprofiler
+    else:
+        # Single method (legacy behavior)
+        go_results = run_go_enrichment(
+            condition_results, condition_labels, outdir,
+            _best_gene_key_fn=_best_gene_key, DESEQ2_COLS_map=DESEQ2_COLS)
+        go_enrichment_combined_plot(
+            go_results, condition_labels,
+            outdir / "cross_condition" / "figures",
+            FIG_FORMAT_override=FIG_FORMAT, FIG_DPI_override=FIG_DPI)
+        export_go_prism(go_results, condition_labels, outdir / "prism_files")
 
     # Combined GSEA dot plots (replaces legacy gsea_dotplot)
     gsea_combined_plot(gsea_results, condition_labels, outdir)
@@ -6744,10 +8450,11 @@ def run_pipeline(config: dict):
     global RMATS_FDR_CUTOFF, RMATS_PVAL_CUTOFF, INCLEVEL_DIFF_CUTOFF, USE_FDR
     global FIG_DPI, FIG_FORMAT, FONT_SIZE
     global COLOR_UP, COLOR_DOWN, COLOR_NS
-    global INTERACTIVE_PLOTS, DESEQ2_COLS, RMATS_COLS
+    global INTERACTIVE_PLOTS, DESEQ2_COLS, RMATS_COLS, RMATS_DUAL_FILTER
     global GSEA_DATABASES, ORA_DATABASES, GENES_OF_INTEREST
     global COUNTS_FILE, SAMPLE_METADATA, GSEA_RANKING, GSEA_MIN_SIZE, GSEA_MAX_SIZE
     global GSEA_PERMUTATIONS, ORA_METHOD
+    global RBP_FILE
 
     CONDITIONS           = config["CONDITIONS"]
     OUTPUT_DIR           = config["OUTPUT_DIR"]
@@ -6761,6 +8468,7 @@ def run_pipeline(config: dict):
     RMATS_PVAL_CUTOFF    = float(config.get("RMATS_PVAL_CUTOFF", RMATS_PVAL_CUTOFF))
     INCLEVEL_DIFF_CUTOFF = float(config.get("INCLEVEL_DIFF_CUTOFF", INCLEVEL_DIFF_CUTOFF))
     USE_FDR              = bool(config.get("USE_FDR", USE_FDR))
+    RMATS_DUAL_FILTER    = bool(config.get("RMATS_DUAL_FILTER", RMATS_DUAL_FILTER))
     FIG_DPI              = int(config.get("FIG_DPI", FIG_DPI))
     FIG_FORMAT           = str(config.get("FIG_FORMAT", FIG_FORMAT))
     FONT_SIZE            = int(config.get("FONT_SIZE", FONT_SIZE))
@@ -6780,6 +8488,7 @@ def run_pipeline(config: dict):
     GSEA_MAX_SIZE        = int(config.get("GSEA_MAX_SIZE", GSEA_MAX_SIZE))
     GSEA_PERMUTATIONS    = int(config.get("GSEA_PERMUTATIONS", GSEA_PERMUTATIONS))
     ORA_METHOD           = str(config.get("ORA_METHOD", ORA_METHOD))
+    RBP_FILE             = str(config.get("RBP_FILE", RBP_FILE))
 
     main()
 

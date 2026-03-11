@@ -156,7 +156,7 @@ class PipelineLauncherApp(tk.Tk):
         self.gsea_ranking_var     = tk.StringVar(value="stat")
         self.gsea_min_size_var    = tk.StringVar(value="15")
         self.gsea_permutations_var = tk.StringVar(value="1000")
-        self.ora_method_var       = tk.StringVar(value="gprofiler")
+        self.ora_method_var       = tk.StringVar(value="both")
 
         # GSEA database selection
         self.gsea_db_vars = {}
@@ -585,10 +585,10 @@ class PipelineLauncherApp(tk.Tk):
         row_ora.pack(fill="x", pady=2)
         ttk.Label(row_ora, text="ORA Method:").pack(side="left")
         ttk.Combobox(row_ora, textvariable=self.ora_method_var, width=18,
-                     values=["gprofiler", "enrichr"],
+                     values=["both", "gprofiler", "enrichr"],
                      state="readonly").pack(side="left", padx=(6, 0))
         ttk.Label(row_ora,
-                  text="(g:Profiler uses hierarchy-aware FDR; matches WSF-Lab methodology)",
+                  text="(both = run Enrichr + g:Profiler side-by-side for comparison)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
     # ---- Tab 5: Column Names (Advanced) -----------------------------------
