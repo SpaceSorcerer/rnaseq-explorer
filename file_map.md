@@ -36,12 +36,31 @@
 
 ## Visualization Package
 
-- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\__init__.py** -- Visualization subpackage init.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\__init__.py** -- Visualization subpackage init listing all available viz modules.
 - **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\theme.py** -- Unified visualization theme with Okabe-Ito colorblind-safe palette, Plotly/Matplotlib template registration, standard color maps for conditions/events/biotypes, and helper functions (count boxes, Venn styling, grid layout).
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\deseq2_viz.py** -- Interactive Plotly DEG visualizations: volcano_plot, ma_plot, pvalue_distribution, log2fc_distribution, top_genes_bar, biotype_breakdown. All use theme.py colors and handle empty DataFrames gracefully.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\rmats_viz.py** -- Interactive Plotly splicing visualizations: dpsi_volcano (colored by event type), event_type_pie, dpsi_distribution (faceted), top_splicing_events, genes_by_event_count (stacked bar). Uses EVENT_COLORS from theme.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\gsea_viz.py** -- Interactive Plotly enrichment visualizations: nes_bar_chart, enrichment_dot_plot, leading_edge_table, ora_dot_plot, enrichment_comparison. Auto-detects column names from gseapy and Enrichr outputs.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\genewalk_viz.py** -- GeneWalk Plotly visualizations: gw_volcano, gw_gene_bar, gw_network (bipartite gene-GO layout), gw_heatmap, gw_domain_pie, gw_gene_summary. Supports per-gene exploration and network rendering.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\qc_viz.py** -- Interactive QC visualizations: pca_plot (scatter by condition), correlation_heatmap (annotated Pearson), top_deg_heatmap (z-scored expression). All use theme colors and handle missing data gracefully.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\cross_condition_viz.py** -- Cross-condition Plotly visualizations: direction_concordance_heatmap, log2fc_scatter (with fit line and significance coloring), overlap_bar (stacked unique/shared genes). Supports pairwise condition comparison.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\viz\gene_investigator.py** -- Per-gene evidence aggregation: investigate_gene() collects DEG/GSEA/ORA/splicing/GeneWalk data, gene_evidence_card() renders visual summary with figures and text. Searches across multiple column name conventions.
 
-## UI Package (planned)
+## UI Package
 
-- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\__init__.py** -- UI subpackage init for future Streamlit pages.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\__init__.py** -- UI subpackage init listing all Streamlit modules and pages.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\app.py** -- Main Streamlit entry point. Multi-tab app with sidebar, data loading, dark/light mode, and dynamic tab visibility based on uploaded data. Run with: `streamlit run rnaseq_explorer/ui/app.py`.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\sidebar.py** -- Shared sidebar: file uploads (DESeq2, rMATS, GeneWalk, counts, GSEA, ORA), threshold sliders (log2FC, padj, dPSI, FDR), display settings (top N, dark mode), and export info. Returns settings dict.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\styles.py** -- CSS styling for Streamlit: colored metric card borders (up/down/total/splicing), sidebar styling, tab styling, dark/light mode support, and utility classes (info/warning/success boxes).
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\__init__.py** -- Pages subpackage init.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\overview.py** -- Overview page: summary metrics (total DEGs, up/down counts, splicing events) and quick-look charts (volcano thumbnail, top enrichment).
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\deseq2_page.py** -- DESeq2 page: all DEG visualizations (volcano, MA, p-value dist, log2FC dist, top genes, biotype), genes-of-interest highlighting, filterable data table with CSV export.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\splicing_page.py** -- Splicing page: all rMATS visualizations (dPSI volcano, event pie, distributions, top events, gene counts), event type multi-selector, data table with CSV export.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\enrichment_page.py** -- Enrichment page: tabbed GSEA/ORA/Comparison views, database selector, NES bars, dot plots, leading edge gene table, up-vs-down comparison chart.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\qc_page.py** -- QC page: PCA scatter (with sklearn), sample correlation heatmap, top DEG z-scored heatmap. Only shown when normalized counts are uploaded.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\cross_condition_page.py** -- Cross-condition page: direction concordance heatmap, pairwise log2FC scatter with condition selectors, gene overlap bar chart. Supports upload of additional condition datasets.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\genewalk_page.py** -- GeneWalk page: volcano, domain pie, gene summaries, per-gene GO bar chart with gene selector, network graph, heatmap, data table. Only shown when GeneWalk data uploaded.
+- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\gene_investigator_page.py** -- Gene Investigator page: gene search with autocomplete, evidence aggregation across all data types, metric cards, visual evidence figures, and expandable detail tables.
 
 ## Tests
 
@@ -49,6 +68,5 @@
 
 ## Empty Directories
 
-- **E:\Claude\rnaseq-explorer\rnaseq_explorer\ui\pages\** -- Planned: Streamlit page modules.
 - **E:\Claude\rnaseq-explorer\configs\** -- Planned: YAML/JSON configuration presets.
 - **E:\Claude\rnaseq-explorer\sample_data\** -- Planned: Small sample datasets for testing.
