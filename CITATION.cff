@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "RNA-seq Explorer"
+abstract: >-
+  Interactive downstream analysis workstation for RNA-seq data.
+  Processes DESeq2 differential expression and rMATS alternative
+  splicing results with GSEA/ORA enrichment analysis,
+  publication-quality visualization, and multi-format export.
+authors:
+  - family-names: Amburn
+    given-names: Brian
+    affiliation: "University of Texas Medical Branch"
+    orcid: ""
+repository-code: "https://github.com/SpaceSorcerer/rnaseq-explorer"
+license: MIT
+version: "0.1.0"
+date-released: "2024-01-01"
+keywords:
+  - RNA-seq
+  - DESeq2
+  - rMATS
+  - GSEA
+  - bioinformatics
+  - visualization
+  - differential expression
+  - alternative splicing

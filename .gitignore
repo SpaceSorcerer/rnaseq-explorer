@@ -6,9 +6,28 @@ __pycache__/
 dist/
 build/
 *.egg
+*.whl
 .venv/
 venv/
 env/
+.eggs/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
 
 # Output directories
 pipeline_output/

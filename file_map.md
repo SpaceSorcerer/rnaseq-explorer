@@ -7,8 +7,10 @@
 - **E:\Claude\rnaseq-explorer\pyproject.toml** -- Python package configuration with dependencies, optional extras (full, dev), and project metadata.
 - **E:\Claude\rnaseq-explorer\LICENSE** -- MIT license, Brian Amburn / University of Texas Medical Branch, 2024-2026.
 - **E:\Claude\rnaseq-explorer\requirements.txt** -- Legacy pip requirements file listing all direct dependencies.
-- **E:\Claude\rnaseq-explorer\README.md** -- Original project README describing the pipeline architecture, usage, and outputs.
-- **E:\Claude\rnaseq-explorer\.gitignore** -- Git ignore rules for Python artifacts, data files, figures, and IDE files.
+- **E:\Claude\rnaseq-explorer\README.md** -- Comprehensive project README covering features, installation, quick start, input formats, page descriptions, batch mode, and development instructions.
+- **E:\Claude\rnaseq-explorer\CITATION.cff** -- Machine-readable citation metadata (CFF format) for academic use and GitHub citation integration.
+- **E:\Claude\rnaseq-explorer\.gitignore** -- Git ignore rules for Python artifacts, testing caches, data files, figures, and IDE files.
+- **E:\Claude\rnaseq-explorer\.github\workflows\test.yml** -- GitHub Actions CI workflow running pytest across Python 3.9-3.12 with ruff linting on 3.12.
 - **E:\Claude\rnaseq-explorer\enhancement_plan.md** -- Planning document for pipeline enhancements and feature additions.
 - **E:\Claude\rnaseq-explorer\extraction_plan.md** -- Detailed extraction plan listing all ~30+ visualization functions to modularize, their monolith line numbers, target modules, and parameterized signatures. All tasks now complete.
 
@@ -65,6 +67,13 @@
 ## Tests
 
 - **E:\Claude\rnaseq-explorer\tests\__init__.py** -- Test suite init.
+- **E:\Claude\rnaseq-explorer\tests\conftest.py** -- Shared pytest fixtures: sample DataFrames for DESeq2 (~30 rows), rMATS (~20 rows), GeneWalk (~15 rows), GSEA (~10 rows), ORA (~10 rows), and an empty DataFrame.
+- **E:\Claude\rnaseq-explorer\tests\test_viz_deseq2.py** -- Tests for deseq2_viz.py: volcano_plot, ma_plot, pvalue_distribution, log2fc_distribution, top_genes_bar, biotype_breakdown. Covers normal data, empty data, single gene, custom cutoffs, and genes-of-interest highlighting.
+- **E:\Claude\rnaseq-explorer\tests\test_viz_rmats.py** -- Tests for rmats_viz.py: dpsi_volcano, event_type_pie, dpsi_distribution, top_splicing_events, genes_by_event_count. Covers normal data, empty data, single event type, and missing columns.
+- **E:\Claude\rnaseq-explorer\tests\test_viz_gsea.py** -- Tests for gsea_viz.py: nes_bar_chart, enrichment_dot_plot, leading_edge_table, ora_dot_plot, enrichment_comparison. Covers normal data, empty data, strict FDR fallback, and gene extraction from leading edges.
+- **E:\Claude\rnaseq-explorer\tests\test_viz_genewalk.py** -- Tests for genewalk_viz.py: gw_volcano, gw_gene_bar, gw_network, gw_heatmap, gw_domain_pie, gw_gene_summary. Covers normal data, empty data, few nodes, single gene, and strict filter edge cases.
+- **E:\Claude\rnaseq-explorer\tests\test_gene_investigator.py** -- Tests for gene_investigator.py: investigate_gene with all/partial/no sources, gene_evidence_card output types. Covers gene-found, gene-not-found, and empty evidence scenarios.
+- **E:\Claude\rnaseq-explorer\tests\test_theme.py** -- Tests for theme.py: setup_plotly_theme execution, PALETTE keys/values, CONDITION_COLORS, EVENT_COLORS, condition_color_map, and grid_dims.
 
 ## Empty Directories
 
