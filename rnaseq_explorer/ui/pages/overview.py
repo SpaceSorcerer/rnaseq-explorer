@@ -66,9 +66,9 @@ def render(settings: dict) -> None:
         dpsi_col = _detect_col(rmats_df, ["IncLevelDifference", "dPSI"])
         if fdr_col and dpsi_col:
             n_splice = int(
-                (rmats_df[fdr_col] < settings["fdr_cutoff"])
-                & (rmats_df[dpsi_col].abs() >= settings["dpsi_cutoff"])
-            ).sum() if fdr_col else 0
+                ((rmats_df[fdr_col] < settings["fdr_cutoff"])
+                 & (rmats_df[dpsi_col].abs() >= settings["dpsi_cutoff"])).sum()
+            )
         else:
             n_splice = len(rmats_df)
         cols[3].metric("Splicing Events", f"{n_splice:,}")

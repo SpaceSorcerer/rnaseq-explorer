@@ -13,6 +13,7 @@
 - **E:\Claude\rnaseq-explorer\.github\workflows\test.yml** -- GitHub Actions CI workflow running pytest across Python 3.9-3.12 with ruff linting on 3.12.
 - **E:\Claude\rnaseq-explorer\enhancement_plan.md** -- Planning document for pipeline enhancements and feature additions.
 - **E:\Claude\rnaseq-explorer\extraction_plan.md** -- Detailed extraction plan listing all ~30+ visualization functions to modularize, their monolith line numbers, target modules, and parameterized signatures. All tasks now complete.
+- **E:\Claude\rnaseq-explorer\review_code_audit.md** -- Deep code audit covering import errors, engine completeness vs monolith, pipeline wrapper verification, exception handling, type issues, viz/UI review, and test coverage gaps. Identifies 1 CRITICAL bug, 2 HIGH issues, 3 MEDIUM issues, and 5 LOW issues.
 
 ## Original Monolith (reference, do not delete)
 
@@ -74,6 +75,10 @@
 - **E:\Claude\rnaseq-explorer\tests\test_viz_genewalk.py** -- Tests for genewalk_viz.py: gw_volcano, gw_gene_bar, gw_network, gw_heatmap, gw_domain_pie, gw_gene_summary. Covers normal data, empty data, few nodes, single gene, and strict filter edge cases.
 - **E:\Claude\rnaseq-explorer\tests\test_gene_investigator.py** -- Tests for gene_investigator.py: investigate_gene with all/partial/no sources, gene_evidence_card output types. Covers gene-found, gene-not-found, and empty evidence scenarios.
 - **E:\Claude\rnaseq-explorer\tests\test_theme.py** -- Tests for theme.py: setup_plotly_theme execution, PALETTE keys/values, CONDITION_COLORS, EVENT_COLORS, condition_color_map, and grid_dims.
+
+## Review Documents
+
+- **E:\Claude\rnaseq-explorer\review_engine_completeness.md** -- Comprehensive cross-reference verifying all 111 monolith functions are accounted for in the modular engine. Documents renamed, moved, inlined, and intentionally dropped functions with rationale.
 
 ## Empty Directories
 

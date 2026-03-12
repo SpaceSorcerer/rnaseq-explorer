@@ -25,7 +25,6 @@ from rnaseq_explorer.engine.deseq2 import (
     DEFAULT_DESEQ2_COLS,
     best_gene_key,
 )
-from rnaseq_explorer.viz.theme import CATEGORY_COLORS
 
 # ---------------------------------------------------------------------------
 # Constants

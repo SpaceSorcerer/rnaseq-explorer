@@ -6,6 +6,7 @@ Provides ranked gene list creation, result parsing, and normalization.
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -498,7 +499,8 @@ def _collect_gsea_rows(
                                 str(row["lead_genes"]) if pd.notna(row["lead_genes"]) else ""
                             )
                         all_rows.append(entry)
-                except Exception:
+                except Exception as e:
+                    logging.debug("Skipping GSEA row: %s", e)
                     continue
 
     return all_rows
@@ -577,7 +579,8 @@ def gsea_dotplot_legacy(
                                 "NES": float(row["nes"]),
                                 "FDR": float(row["fdr"]),
                             })
-                    except Exception:
+                    except Exception as e:
+                        logging.debug("Skipping GSEA fallback row: %s", e)
                         continue
 
         if not all_rows:
@@ -855,8 +858,8 @@ def gsea_enrichment_plots(
                 try:
                     shutil.copy2(str(pf), str(dest_path))
                     collected += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.debug("Could not copy %s: %s", pf, e)
 
         # --- Option B: try to regenerate if none found ---
         if collected == 0:
@@ -907,9 +910,11 @@ def gsea_enrichment_plots(
                                     ofname=str(out_path),
                                 )
                                 collected += 1
-                            except Exception:
+                            except Exception as e:
+                                logging.debug("Could not regenerate plot for %s: %s", term, e)
                                 continue
-                    except Exception:
+                    except Exception as e:
+                        logging.debug("Error processing GSEA database results: %s", e)
                         continue
 
         if collected > 0:
