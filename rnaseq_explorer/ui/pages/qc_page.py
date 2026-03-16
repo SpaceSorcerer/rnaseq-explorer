@@ -102,11 +102,14 @@ def render(settings: dict) -> None:
     # ---- Correlation Heatmap ----
     st.subheader("Sample Correlation")
 
-    corr = numeric_df.corr(method="pearson")
-    st.plotly_chart(
-        correlation_heatmap(corr, sample_labels=sample_names),
-        use_container_width=True,
-    )
+    try:
+        corr = numeric_df.corr(method="pearson")
+        st.plotly_chart(
+            correlation_heatmap(corr, sample_labels=sample_names),
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.warning(f"Could not render Correlation Heatmap: {e}. Check that your counts matrix has numeric columns.")
 
     st.markdown("---")
 
@@ -129,15 +132,18 @@ def render(settings: dict) -> None:
             if gene_col in expr.columns:
                 expr = expr.set_index(gene_col)
 
-            st.plotly_chart(
-                top_deg_heatmap(
-                    expr.select_dtypes(include=[np.number]),
-                    gene_list=gene_list,
-                    sample_labels=sample_names,
-                    condition_labels=conditions,
-                ),
-                use_container_width=True,
-            )
+            try:
+                st.plotly_chart(
+                    top_deg_heatmap(
+                        expr.select_dtypes(include=[np.number]),
+                        gene_list=gene_list,
+                        sample_labels=sample_names,
+                        condition_labels=conditions,
+                    ),
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.warning(f"Could not render Top DEG Heatmap: {e}. Check that your counts matrix and DESeq2 results have matching gene names.")
         else:
             st.info("DESeq2 results required for DEG heatmap.")
     else:

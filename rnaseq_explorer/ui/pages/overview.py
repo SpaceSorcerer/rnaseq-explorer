@@ -87,35 +87,44 @@ def render(settings: dict) -> None:
             col_a, col_b = st.columns(2)
 
             with col_a:
-                st.plotly_chart(
-                    volcano_plot(
-                        deseq2_df,
-                        log2fc_col=log2fc_col,
-                        padj_col=padj_col,
-                        gene_col=gene_col or "gene_name",
-                        log2fc_cutoff=settings["log2fc_cutoff"],
-                        padj_cutoff=settings["padj_cutoff"],
-                    ),
-                    use_container_width=True,
-                )
+                try:
+                    st.plotly_chart(
+                        volcano_plot(
+                            deseq2_df,
+                            log2fc_col=log2fc_col,
+                            padj_col=padj_col,
+                            gene_col=gene_col or "gene_name",
+                            log2fc_cutoff=settings["log2fc_cutoff"],
+                            padj_cutoff=settings["padj_cutoff"],
+                        ),
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.warning(f"Could not render Volcano Plot: {e}. Check that your data has the expected columns.")
 
             with col_b:
-                st.plotly_chart(
-                    top_genes_bar(
-                        deseq2_df,
-                        log2fc_col=log2fc_col,
-                        padj_col=padj_col,
-                        gene_col=gene_col or "gene_name",
-                        n=10,
-                    ),
-                    use_container_width=True,
-                )
+                try:
+                    st.plotly_chart(
+                        top_genes_bar(
+                            deseq2_df,
+                            log2fc_col=log2fc_col,
+                            padj_col=padj_col,
+                            gene_col=gene_col or "gene_name",
+                            n=10,
+                        ),
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.warning(f"Could not render Top Genes Bar: {e}. Check that your data has the expected columns.")
 
     if gsea_df is not None and not gsea_df.empty:
-        st.plotly_chart(
-            nes_bar_chart(gsea_df, n=10, fdr_cutoff=settings["fdr_cutoff"]),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                nes_bar_chart(gsea_df, n=10, fdr_cutoff=settings["fdr_cutoff"]),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render NES Bar Chart: {e}. Check that your data has the expected columns.")
 
 
 def _detect_col(df: pd.DataFrame, candidates: list[str]) -> str | None:

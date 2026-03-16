@@ -5,6 +5,8 @@ Displays rMATS alternative splicing visualizations with event type filtering.
 
 from __future__ import annotations
 
+import io
+
 import streamlit as st
 import pandas as pd
 
@@ -59,59 +61,74 @@ def render(settings: dict) -> None:
 
     with col1:
         st.subheader("dPSI Volcano Plot")
-        st.plotly_chart(
-            dpsi_volcano(
-                filtered_df,
-                dpsi_col=dpsi_col,
-                fdr_col=fdr_col,
-                gene_col=gene_col,
-                event_type_col=event_type_col,
-                dpsi_cutoff=settings["dpsi_cutoff"],
-                fdr_cutoff=settings["fdr_cutoff"],
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                dpsi_volcano(
+                    filtered_df,
+                    dpsi_col=dpsi_col,
+                    fdr_col=fdr_col,
+                    gene_col=gene_col,
+                    event_type_col=event_type_col,
+                    dpsi_cutoff=settings["dpsi_cutoff"],
+                    fdr_cutoff=settings["fdr_cutoff"],
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render dPSI Volcano Plot: {e}. Check that your data has the expected columns.")
 
     with col2:
         st.subheader("Event Types")
-        st.plotly_chart(
-            event_type_pie(filtered_df, event_type_col=event_type_col),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                event_type_pie(filtered_df, event_type_col=event_type_col),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render Event Type Pie: {e}. Check that your data has the expected columns.")
 
     # ---- Distribution ----
     st.subheader("ΔPSI Distribution")
-    st.plotly_chart(
-        dpsi_distribution(filtered_df, dpsi_col=dpsi_col, event_type_col=event_type_col),
-        use_container_width=True,
-    )
+    try:
+        st.plotly_chart(
+            dpsi_distribution(filtered_df, dpsi_col=dpsi_col, event_type_col=event_type_col),
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.warning(f"Could not render dPSI Distribution: {e}. Check that your data has the expected columns.")
 
     # ---- Top Events + Gene Counts ----
     col3, col4 = st.columns(2)
 
     with col3:
         st.subheader("Top Splicing Events")
-        st.plotly_chart(
-            top_splicing_events(
-                filtered_df,
-                dpsi_col=dpsi_col,
-                fdr_col=fdr_col,
-                gene_col=gene_col,
-                n=settings["n_top_genes"],
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                top_splicing_events(
+                    filtered_df,
+                    dpsi_col=dpsi_col,
+                    fdr_col=fdr_col,
+                    gene_col=gene_col,
+                    n=settings["n_top_genes"],
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render Top Splicing Events: {e}. Check that your data has the expected columns.")
 
     with col4:
         st.subheader("Genes by Event Count")
-        st.plotly_chart(
-            genes_by_event_count(
-                filtered_df,
-                gene_col=gene_col,
-                event_type_col=event_type_col,
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                genes_by_event_count(
+                    filtered_df,
+                    gene_col=gene_col,
+                    event_type_col=event_type_col,
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render Genes by Event Count: {e}. Check that your data has the expected columns.")
 
     # ---- Data Table ----
     st.markdown("---")
@@ -127,14 +144,29 @@ def render(settings: dict) -> None:
 
     st.dataframe(display_df, use_container_width=True, height=400)
 
-    csv = display_df.to_csv(index=False)
-    st.download_button(
-        "Download as CSV",
-        csv,
-        file_name="rmats_filtered.csv",
-        mime="text/csv",
-        key="splice_download",
-    )
+    with st.expander("Export", expanded=False):
+        csv = display_df.to_csv(index=False)
+        st.download_button(
+            "Download as CSV",
+            csv,
+            file_name="rmats_filtered.csv",
+            mime="text/csv",
+            key="splice_csv",
+        )
+
+        try:
+            excel_buf = io.BytesIO()
+            display_df.to_excel(excel_buf, index=False, engine="openpyxl")
+            excel_buf.seek(0)
+            st.download_button(
+                "Download as Excel",
+                excel_buf,
+                file_name="rmats_filtered.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="splice_xlsx",
+            )
+        except Exception as e:
+            st.error(f"Excel export failed: {e}")
 
 
 def _detect_col(df: pd.DataFrame, candidates: list[str]) -> str | None:

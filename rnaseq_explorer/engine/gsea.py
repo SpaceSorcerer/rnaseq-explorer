@@ -361,40 +361,6 @@ def run_gsea_enrichment(
     return gsea_results
 
 
-def parse_gsea_results(
-    gsea_results: dict[str, dict[str, pd.DataFrame]],
-    condition_labels: dict[str, str],
-) -> pd.DataFrame:
-    """Flatten GSEA results into a single summary DataFrame.
-
-    Parameters
-    ----------
-    gsea_results : dict
-        Output of run_gsea_enrichment().
-    condition_labels : dict
-        Maps condition name -> human-readable label.
-
-    Returns
-    -------
-    pd.DataFrame
-        Combined summary with columns: Condition, Database, Term, NES, FDR, geneset_size.
-    """
-    rows = []
-    for cond_name, cond_data in gsea_results.items():
-        cond_label = condition_labels.get(cond_name, cond_name)
-        for db, df in cond_data.items():
-            for _, row in df.iterrows():
-                rows.append({
-                    "Condition": cond_label,
-                    "Database": db,
-                    "Term": row.get("Term", ""),
-                    "NES": row.get("nes", np.nan),
-                    "FDR": row.get("fdr", np.nan),
-                    "geneset_size": row.get("geneset_size", 0),
-                })
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-
 # ---------------------------------------------------------------------------
 # GSEA visualization helpers
 # ---------------------------------------------------------------------------

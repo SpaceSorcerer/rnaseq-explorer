@@ -125,16 +125,19 @@ def render(settings: dict) -> None:
         df1_std = df1.rename(columns={gc1: "gene_name", lfc1: "log2FoldChange"})
         df2_std = df2.rename(columns={gc2: "gene_name", lfc2: "log2FoldChange"})
 
-        st.plotly_chart(
-            log2fc_scatter(
-                df1_std, df2_std,
-                gene_col="gene_name",
-                log2fc_col="log2FoldChange",
-                cond1_name=cond1,
-                cond2_name=cond2,
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                log2fc_scatter(
+                    df1_std, df2_std,
+                    gene_col="gene_name",
+                    log2fc_col="log2FoldChange",
+                    cond1_name=cond1,
+                    cond2_name=cond2,
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render log2FC Scatter: {e}. Check that your data has the expected columns.")
 
     st.markdown("---")
 

@@ -57,17 +57,23 @@ def render(settings: dict) -> None:
 
     with col1:
         st.subheader("Similarity vs Significance")
-        st.plotly_chart(
-            gw_volcano(gw_df, sim_col=sim_col, padj_col=padj_col, gene_col=gene_col, padj_cutoff=gw_padj_cutoff),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                gw_volcano(gw_df, sim_col=sim_col, padj_col=padj_col, gene_col=gene_col, padj_cutoff=gw_padj_cutoff),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render GeneWalk Volcano: {e}. Check that your data has the expected columns.")
 
     with col2:
         st.subheader("GO Domain Distribution")
-        st.plotly_chart(
-            gw_domain_pie(gw_df, padj_cutoff=gw_padj_cutoff, padj_col=padj_col),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                gw_domain_pie(gw_df, padj_cutoff=gw_padj_cutoff, padj_col=padj_col),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render GO Domain Pie: {e}. Check that your data has the expected columns.")
 
     st.markdown("---")
 
@@ -76,23 +82,29 @@ def render(settings: dict) -> None:
 
     with col3:
         st.subheader("Gene Summary (by GO Term Count)")
-        st.plotly_chart(
-            gw_gene_summary(
-                gw_df, padj_cutoff=gw_padj_cutoff, metric="count",
-                padj_col=padj_col, gene_col=gene_col, sim_col=sim_col,
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                gw_gene_summary(
+                    gw_df, padj_cutoff=gw_padj_cutoff, metric="count",
+                    padj_col=padj_col, gene_col=gene_col, sim_col=sim_col,
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render Gene Summary (count): {e}. Check that your data has the expected columns.")
 
     with col4:
         st.subheader("Gene Summary (by Mean Similarity)")
-        st.plotly_chart(
-            gw_gene_summary(
-                gw_df, padj_cutoff=gw_padj_cutoff, metric="mean_sim",
-                padj_col=padj_col, gene_col=gene_col, sim_col=sim_col,
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                gw_gene_summary(
+                    gw_df, padj_cutoff=gw_padj_cutoff, metric="mean_sim",
+                    padj_col=padj_col, gene_col=gene_col, sim_col=sim_col,
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render Gene Summary (mean similarity): {e}. Check that your data has the expected columns.")
 
     st.markdown("---")
 
@@ -104,37 +116,46 @@ def render(settings: dict) -> None:
         selected_gene = st.selectbox("Select Gene", gene_options, key="gw_gene_select")
 
         if selected_gene:
-            st.plotly_chart(
-                gw_gene_bar(
-                    gw_df, gene=selected_gene,
-                    padj_col=padj_col, go_name_col=go_name_col, sim_col=sim_col,
-                ),
-                use_container_width=True,
-            )
+            try:
+                st.plotly_chart(
+                    gw_gene_bar(
+                        gw_df, gene=selected_gene,
+                        padj_col=padj_col, go_name_col=go_name_col, sim_col=sim_col,
+                    ),
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.warning(f"Could not render Gene Bar chart: {e}. Check that your data has the expected columns.")
 
     st.markdown("---")
 
     # ---- Network ----
     st.subheader("Gene-GO Term Network")
-    st.plotly_chart(
-        gw_network(
-            gw_df, padj_cutoff=gw_padj_cutoff,
-            padj_col=padj_col, gene_col=gene_col, go_name_col=go_name_col, sim_col=sim_col,
-        ),
-        use_container_width=True,
-    )
+    try:
+        st.plotly_chart(
+            gw_network(
+                gw_df, padj_cutoff=gw_padj_cutoff,
+                padj_col=padj_col, gene_col=gene_col, go_name_col=go_name_col, sim_col=sim_col,
+            ),
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.warning(f"Could not render Gene-GO Network: {e}. Check that your data has the expected columns.")
 
     st.markdown("---")
 
     # ---- Heatmap ----
     st.subheader("Gene x GO Term Heatmap")
-    st.plotly_chart(
-        gw_heatmap(
-            gw_df, padj_cutoff=gw_padj_cutoff,
-            padj_col=padj_col, gene_col=gene_col, go_name_col=go_name_col, sim_col=sim_col,
-        ),
-        use_container_width=True,
-    )
+    try:
+        st.plotly_chart(
+            gw_heatmap(
+                gw_df, padj_cutoff=gw_padj_cutoff,
+                padj_col=padj_col, gene_col=gene_col, go_name_col=go_name_col, sim_col=sim_col,
+            ),
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.warning(f"Could not render Gene x GO Heatmap: {e}. Check that your data has the expected columns.")
 
     # ---- Data Table ----
     st.markdown("---")

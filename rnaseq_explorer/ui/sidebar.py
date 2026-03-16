@@ -6,8 +6,11 @@ and export controls in the Streamlit sidebar.
 
 from __future__ import annotations
 
+import io
+import zipfile
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 
@@ -149,9 +152,41 @@ def render_sidebar() -> dict[str, Any]:
 
         st.markdown("---")
 
+        # ---- Genes of Interest ----
+        st.header("Genes of Interest")
+        goi_text = st.text_area(
+            "Paste gene names (one per line)",
+            value="",
+            height=100,
+            help="These genes will be highlighted on the volcano plot.",
+            key="goi_text_area",
+        )
+        goi_list = [g.strip() for g in goi_text.splitlines() if g.strip()]
+        st.session_state["genes_of_interest"] = goi_list if goi_list else None
+
+        st.markdown("---")
+
         # ---- Export ----
         st.header("Export")
         st.info("Use the camera icon on each chart to export as PNG.")
+
+        # Export All as ZIP
+        _has_data = any(
+            st.session_state.get(k) is not None
+            for k in ("deseq2_data", "rmats_data", "gsea_data", "ora_data", "genewalk_data")
+        )
+        if _has_data:
+            try:
+                zip_buf = _create_export_zip()
+                st.download_button(
+                    "Export All Results (ZIP)",
+                    zip_buf,
+                    file_name="rnaseq_explorer_results.zip",
+                    mime="application/zip",
+                    key="export_all_zip",
+                )
+            except Exception as e:
+                st.error(f"ZIP export failed: {e}")
 
     return {
         "deseq2_file": deseq2_file,
@@ -167,3 +202,17 @@ def render_sidebar() -> dict[str, Any]:
         "dark_mode": dark_mode,
         "n_top_genes": n_top_genes,
     }
+
+
+def _create_export_zip() -> io.BytesIO:
+    """Create ZIP with all loaded data as Excel files."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for key in ("deseq2_data", "rmats_data", "gsea_data", "ora_data", "genewalk_data"):
+            df: pd.DataFrame | None = st.session_state.get(key)
+            if df is not None and not df.empty:
+                excel_buf = io.BytesIO()
+                df.to_excel(excel_buf, index=False, engine="openpyxl")
+                zf.writestr(f"{key}.xlsx", excel_buf.getvalue())
+    buf.seek(0)
+    return buf

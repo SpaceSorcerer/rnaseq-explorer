@@ -5,6 +5,8 @@ Displays all DEG visualizations with interactive controls and data table.
 
 from __future__ import annotations
 
+import io
+
 import streamlit as st
 import pandas as pd
 
@@ -41,15 +43,8 @@ def render(settings: dict) -> None:
     basemean_col = _detect_col(deseq2_df, ["baseMean", "basemean", "AveExpr"]) or "baseMean"
     pvalue_col = _detect_col(deseq2_df, ["pvalue", "PValue", "p_value"]) or "pvalue"
 
-    # Genes of interest input
-    goi_text = st.text_input(
-        "Genes of Interest (comma-separated)",
-        value="",
-        help="Highlight specific genes on the volcano plot.",
-    )
-    genes_of_interest = (
-        [g.strip() for g in goi_text.split(",") if g.strip()] if goi_text else None
-    )
+    # Genes of interest — pull from sidebar session state
+    genes_of_interest: list[str] | None = st.session_state.get("genes_of_interest")
 
     st.markdown("---")
 
@@ -58,81 +53,99 @@ def render(settings: dict) -> None:
 
     with col1:
         st.subheader("Volcano Plot")
-        st.plotly_chart(
-            volcano_plot(
-                deseq2_df,
-                log2fc_col=log2fc_col,
-                padj_col=padj_col,
-                gene_col=gene_col,
-                log2fc_cutoff=settings["log2fc_cutoff"],
-                padj_cutoff=settings["padj_cutoff"],
-                genes_of_interest=genes_of_interest,
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                volcano_plot(
+                    deseq2_df,
+                    log2fc_col=log2fc_col,
+                    padj_col=padj_col,
+                    gene_col=gene_col,
+                    log2fc_cutoff=settings["log2fc_cutoff"],
+                    padj_cutoff=settings["padj_cutoff"],
+                    genes_of_interest=genes_of_interest,
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render Volcano Plot: {e}. Check that your data has the expected columns.")
 
     with col2:
         st.subheader("MA Plot")
-        st.plotly_chart(
-            ma_plot(
-                deseq2_df,
-                basemean_col=basemean_col,
-                log2fc_col=log2fc_col,
-                padj_col=padj_col,
-                gene_col=gene_col,
-                log2fc_cutoff=settings["log2fc_cutoff"],
-                padj_cutoff=settings["padj_cutoff"],
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                ma_plot(
+                    deseq2_df,
+                    basemean_col=basemean_col,
+                    log2fc_col=log2fc_col,
+                    padj_col=padj_col,
+                    gene_col=gene_col,
+                    log2fc_cutoff=settings["log2fc_cutoff"],
+                    padj_cutoff=settings["padj_cutoff"],
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render MA Plot: {e}. Check that your data has the expected columns.")
 
     # ---- Distributions ----
     col3, col4 = st.columns(2)
 
     with col3:
         st.subheader("P-value Distribution")
-        st.plotly_chart(
-            pvalue_distribution(deseq2_df, pvalue_col=pvalue_col, padj_col=padj_col),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                pvalue_distribution(deseq2_df, pvalue_col=pvalue_col, padj_col=padj_col),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render P-value Distribution: {e}. Check that your data has the expected columns.")
 
     with col4:
         st.subheader("log₂FC Distribution")
-        st.plotly_chart(
-            log2fc_distribution(
-                deseq2_df,
-                log2fc_col=log2fc_col,
-                padj_col=padj_col,
-                padj_cutoff=settings["padj_cutoff"],
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                log2fc_distribution(
+                    deseq2_df,
+                    log2fc_col=log2fc_col,
+                    padj_col=padj_col,
+                    padj_cutoff=settings["padj_cutoff"],
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render log2FC Distribution: {e}. Check that your data has the expected columns.")
 
     # ---- Top Genes + Biotype ----
     col5, col6 = st.columns(2)
 
     with col5:
         st.subheader("Top Genes")
-        st.plotly_chart(
-            top_genes_bar(
-                deseq2_df,
-                log2fc_col=log2fc_col,
-                padj_col=padj_col,
-                gene_col=gene_col,
-                n=settings["n_top_genes"],
-            ),
-            use_container_width=True,
-        )
+        try:
+            st.plotly_chart(
+                top_genes_bar(
+                    deseq2_df,
+                    log2fc_col=log2fc_col,
+                    padj_col=padj_col,
+                    gene_col=gene_col,
+                    n=settings["n_top_genes"],
+                ),
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not render Top Genes: {e}. Check that your data has the expected columns.")
 
     with col6:
         biotype_col = _detect_col(deseq2_df, ["biotype_group", "biotype", "gene_biotype"])
         direction_col = _detect_col(deseq2_df, ["direction", "Direction"])
         if biotype_col and direction_col:
             st.subheader("Biotype Breakdown")
-            st.plotly_chart(
-                biotype_breakdown(deseq2_df, biotype_col=biotype_col, direction_col=direction_col),
-                use_container_width=True,
-            )
+            try:
+                st.plotly_chart(
+                    biotype_breakdown(deseq2_df, biotype_col=biotype_col, direction_col=direction_col),
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.warning(f"Could not render Biotype Breakdown: {e}. Check that your data has the expected columns.")
 
     # ---- Data Table ----
     st.markdown("---")
@@ -151,13 +164,29 @@ def render(settings: dict) -> None:
     st.dataframe(display_df, use_container_width=True, height=400)
 
     # Export
-    csv = display_df.to_csv(index=False)
-    st.download_button(
-        "Download as CSV",
-        csv,
-        file_name="deseq2_filtered.csv",
-        mime="text/csv",
-    )
+    with st.expander("Export", expanded=False):
+        csv = display_df.to_csv(index=False)
+        st.download_button(
+            "Download as CSV",
+            csv,
+            file_name="deseq2_filtered.csv",
+            mime="text/csv",
+            key="deseq2_csv",
+        )
+
+        try:
+            excel_buf = io.BytesIO()
+            display_df.to_excel(excel_buf, index=False, engine="openpyxl")
+            excel_buf.seek(0)
+            st.download_button(
+                "Download as Excel",
+                excel_buf,
+                file_name="deseq2_filtered.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="deseq2_xlsx",
+            )
+        except Exception as e:
+            st.error(f"Excel export failed: {e}")
 
 
 def _detect_col(df: pd.DataFrame, candidates: list[str]) -> str | None:

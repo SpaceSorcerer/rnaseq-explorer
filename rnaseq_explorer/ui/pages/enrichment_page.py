@@ -5,6 +5,8 @@ Displays GSEA and ORA visualizations with database selection and leading edge ta
 
 from __future__ import annotations
 
+import io
+
 import streamlit as st
 import pandas as pd
 
@@ -52,25 +54,31 @@ def render(settings: dict) -> None:
 
             with col1:
                 st.subheader("NES Bar Chart")
-                st.plotly_chart(
-                    nes_bar_chart(
-                        filtered_gsea,
-                        n=settings["n_top_genes"],
-                        fdr_cutoff=settings["fdr_cutoff"],
-                    ),
-                    use_container_width=True,
-                )
+                try:
+                    st.plotly_chart(
+                        nes_bar_chart(
+                            filtered_gsea,
+                            n=settings["n_top_genes"],
+                            fdr_cutoff=settings["fdr_cutoff"],
+                        ),
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.warning(f"Could not render NES Bar Chart: {e}. Check that your data has the expected columns.")
 
             with col2:
                 st.subheader("Enrichment Dot Plot")
-                st.plotly_chart(
-                    enrichment_dot_plot(
-                        filtered_gsea,
-                        n=30,
-                        fdr_cutoff=settings["fdr_cutoff"],
-                    ),
-                    use_container_width=True,
-                )
+                try:
+                    st.plotly_chart(
+                        enrichment_dot_plot(
+                            filtered_gsea,
+                            n=30,
+                            fdr_cutoff=settings["fdr_cutoff"],
+                        ),
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.warning(f"Could not render Enrichment Dot Plot: {e}. Check that your data has the expected columns.")
 
             # Leading edge table
             st.markdown("---")
@@ -95,6 +103,30 @@ def render(settings: dict) -> None:
             st.markdown("---")
             st.subheader("GSEA Results Table")
             st.dataframe(filtered_gsea, use_container_width=True, height=300)
+
+            with st.expander("Export GSEA Results", expanded=False):
+                csv = filtered_gsea.to_csv(index=False)
+                st.download_button(
+                    "Download as CSV",
+                    csv,
+                    file_name="gsea_results.csv",
+                    mime="text/csv",
+                    key="gsea_csv",
+                )
+
+                try:
+                    excel_buf = io.BytesIO()
+                    filtered_gsea.to_excel(excel_buf, index=False, engine="openpyxl")
+                    excel_buf.seek(0)
+                    st.download_button(
+                        "Download as Excel",
+                        excel_buf,
+                        file_name="gsea_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="gsea_xlsx",
+                    )
+                except Exception as e:
+                    st.error(f"Excel export failed: {e}")
         else:
             st.info("Upload GSEA results to view this tab.")
 
@@ -111,18 +143,45 @@ def render(settings: dict) -> None:
                 filtered_ora = ora_df
 
             st.subheader("ORA Dot Plot")
-            st.plotly_chart(
-                ora_dot_plot(
-                    filtered_ora,
-                    n=settings["n_top_genes"],
-                    fdr_cutoff=settings["padj_cutoff"],
-                ),
-                use_container_width=True,
-            )
+            try:
+                st.plotly_chart(
+                    ora_dot_plot(
+                        filtered_ora,
+                        n=settings["n_top_genes"],
+                        fdr_cutoff=settings["padj_cutoff"],
+                    ),
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.warning(f"Could not render ORA Dot Plot: {e}. Check that your data has the expected columns.")
 
             st.markdown("---")
             st.subheader("ORA Results Table")
             st.dataframe(filtered_ora, use_container_width=True, height=300)
+
+            with st.expander("Export ORA Results", expanded=False):
+                csv = filtered_ora.to_csv(index=False)
+                st.download_button(
+                    "Download as CSV",
+                    csv,
+                    file_name="ora_results.csv",
+                    mime="text/csv",
+                    key="ora_csv",
+                )
+
+                try:
+                    excel_buf = io.BytesIO()
+                    filtered_ora.to_excel(excel_buf, index=False, engine="openpyxl")
+                    excel_buf.seek(0)
+                    st.download_button(
+                        "Download as Excel",
+                        excel_buf,
+                        file_name="ora_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="ora_xlsx",
+                    )
+                except Exception as e:
+                    st.error(f"Excel export failed: {e}")
         else:
             st.info("Upload ORA results to view this tab.")
 
@@ -135,10 +194,13 @@ def render(settings: dict) -> None:
                 down_df = gsea_df[gsea_df[nes_col] < 0]
 
                 st.subheader("Up vs Down Enrichment Comparison")
-                st.plotly_chart(
-                    enrichment_comparison(up_df, down_df, n=15, fdr_cutoff=settings["fdr_cutoff"]),
-                    use_container_width=True,
-                )
+                try:
+                    st.plotly_chart(
+                        enrichment_comparison(up_df, down_df, n=15, fdr_cutoff=settings["fdr_cutoff"]),
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.warning(f"Could not render Enrichment Comparison: {e}. Check that your data has the expected columns.")
             else:
                 st.info("NES column not found in GSEA results.")
         else:

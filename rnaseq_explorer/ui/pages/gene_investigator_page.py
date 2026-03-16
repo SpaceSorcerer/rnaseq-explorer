@@ -77,17 +77,25 @@ def render(settings: dict) -> None:
 
     # ---- Gather Evidence ----
     with st.spinner(f"Gathering evidence for {gene_name}..."):
-        evidence = investigate_gene(
-            gene_name=gene_name,
-            deseq2_results=st.session_state.get("deseq2_data"),
-            gsea_results=st.session_state.get("gsea_data"),
-            ora_results=st.session_state.get("ora_data"),
-            rmats_results=st.session_state.get("rmats_data"),
-            genewalk_results=st.session_state.get("genewalk_data"),
-        )
+        try:
+            evidence = investigate_gene(
+                gene_name=gene_name,
+                deseq2_results=st.session_state.get("deseq2_data"),
+                gsea_results=st.session_state.get("gsea_data"),
+                ora_results=st.session_state.get("ora_data"),
+                rmats_results=st.session_state.get("rmats_data"),
+                genewalk_results=st.session_state.get("genewalk_data"),
+            )
+        except Exception as e:
+            st.warning(f"Could not gather evidence for {gene_name}: {e}. Check that your data has the expected columns.")
+            return
 
     # ---- Evidence Card ----
-    figures, summary_text = gene_evidence_card(evidence)
+    try:
+        figures, summary_text = gene_evidence_card(evidence)
+    except Exception as e:
+        st.warning(f"Could not build evidence card: {e}. Check that your data has the expected columns.")
+        return
 
     # Summary header
     deg_info = evidence.get("deg", {})
@@ -121,7 +129,10 @@ def render(settings: dict) -> None:
 
     # Render figures
     for fig in figures:
-        st.plotly_chart(fig, use_container_width=True)
+        try:
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Could not render evidence figure: {e}.")
 
     # Text summary
     with st.expander("Full Evidence Summary (text)", expanded=False):
