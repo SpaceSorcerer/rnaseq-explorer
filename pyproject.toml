@@ -53,6 +53,9 @@ dev = [
 Homepage = "https://github.com/SpaceSorcerer/rnaseq-explorer"
 Repository = "https://github.com/SpaceSorcerer/rnaseq-explorer"
 
+[tool.setuptools.packages.find]
+include = ["rnaseq_explorer*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py39"
