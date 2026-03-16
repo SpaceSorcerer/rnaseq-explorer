@@ -11,8 +11,6 @@ from itertools import combinations
 from pathlib import Path
 from typing import Optional
 
-import matplotlib.lines as mlines
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -34,9 +32,7 @@ from rnaseq_explorer.viz.theme import (
     COLOR_DOWN,
     COLOR_NS,
     COLOR_UP,
-    CONDITION_COLORS,
     EVENT_COLORS,
-    add_count_box,
     grid_dims,
     style_venn,
 )
@@ -54,7 +50,7 @@ except ImportError:
     _UPSET_AVAILABLE = False
 
 try:
-    from scipy.stats import pearsonr, fisher_exact
+    from scipy.stats import pearsonr, fisher_exact  # noqa: F401
     _SCIPY_AVAILABLE = True
 except ImportError:
     _SCIPY_AVAILABLE = False

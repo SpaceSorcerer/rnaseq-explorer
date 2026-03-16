@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
-import pytest
 
 from rnaseq_explorer.viz.rmats_viz import (
     dpsi_distribution,

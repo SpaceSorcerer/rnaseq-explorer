@@ -9,10 +9,9 @@ Provides consistent styling across all charts:
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Sequence
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import seaborn as sns
 
 try:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from rnaseq_explorer.viz.theme import (
     BIOTYPE_COLORS,

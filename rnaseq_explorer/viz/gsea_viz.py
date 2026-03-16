@@ -14,9 +14,6 @@ import plotly.graph_objects as go
 
 from rnaseq_explorer.viz.theme import (
     PALETTE,
-    CATEGORY_COLORS,
-    FONT_SIZE_TITLE,
-    FONT_SIZE_ANNOTATION,
     setup_plotly_theme,
 )
 

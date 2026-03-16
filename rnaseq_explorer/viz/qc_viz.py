@@ -8,14 +8,11 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
 from rnaseq_explorer.viz.theme import (
     PALETTE,
-    CONDITION_COLORS,
-    FONT_SIZE_TITLE,
     condition_color_map,
     setup_plotly_theme,
 )
@@ -88,8 +85,8 @@ def pca_plot(
                 name=str(cond),
                 hovertemplate=(
                     "<b>%{text}</b><br>"
-                    f"PC1: %{{x:.2f}}<br>"
-                    f"PC2: %{{y:.2f}}<br>"
+                    "PC1: %{x:.2f}<br>"
+                    "PC2: %{y:.2f}<br>"
                     "<extra></extra>"
                 ),
             )

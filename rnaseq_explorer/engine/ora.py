@@ -13,7 +13,6 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
 from xml.dom import minidom
 
 import matplotlib.lines as mlines

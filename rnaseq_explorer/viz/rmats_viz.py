@@ -6,7 +6,6 @@ top splicing event bar charts, and gene-by-event-count summaries for rMATS resul
 
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -16,7 +15,6 @@ from plotly.subplots import make_subplots
 from rnaseq_explorer.viz.theme import (
     PALETTE,
     EVENT_COLORS,
-    FONT_SIZE_TITLE,
     setup_plotly_theme,
 )
 
@@ -90,8 +88,8 @@ def dpsi_volcano(
                 text=gene_text,
                 hovertemplate=(
                     "<b>%{text}</b><br>"
-                    f"dPSI: %{{x:.3f}}<br>"
-                    f"FDR: %{{customdata:.2e}}<br>"
+                    "dPSI: %{x:.3f}<br>"
+                    "FDR: %{customdata:.2e}<br>"
                     "<extra></extra>"
                 ),
                 customdata=subset[fdr_col],

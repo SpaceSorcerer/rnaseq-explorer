@@ -12,13 +12,9 @@ from typing import Any
 
 from rnaseq_explorer.engine.deseq2 import (
     DEFAULT_DESEQ2_COLS,
-    BIOTYPE_GROUPS,
-    BIOTYPE_ORDER,
-    BIOTYPE_COLORS,
     load_file,
     validate_columns,
     normalize_deseq2_columns,
-    best_gene_key,
     enrich_with_gene_names,
     reassign_biotypes_from_mygene,
     filter_deseq2,
@@ -46,12 +42,9 @@ from rnaseq_explorer.engine.deseq2 import (
     cross_condition_biotype_direction,
 )
 from rnaseq_explorer.engine.rmats import (
-    RMATS_EVENT_TYPES,
     DEFAULT_RMATS_COLS,
     load_all_rmats,
     filter_rmats,
-    make_event_key,
-    # Per-condition rMATS visualization functions
     rmats_scatter,
     rmats_combined_volcano,
     rmats_event_summary_chart,
@@ -60,20 +53,13 @@ from rnaseq_explorer.engine.rmats import (
 )
 from rnaseq_explorer.engine.gsea import (
     run_gsea_enrichment,
-    normalize_gsea_cols,
-    create_ranked_list,
-    run_gsea_prerank,
-    # GSEA visualization functions
     gsea_combined_plot,
     gsea_enrichment_plots,
     export_gsea_leading_edge,
-    gsea_dotplot_legacy,
 )
 from rnaseq_explorer.engine.ora import (
     run_gprofiler_ora,
     run_enrichr_ora,
-    run_dual_ora,
-    # ORA visualization functions
     go_enrichment_combined_plot,
     export_go_prism,
 )
@@ -84,11 +70,8 @@ from rnaseq_explorer.engine.qc import (
     compute_top_deg_heatmap,
 )
 from rnaseq_explorer.engine.cross_condition import (
-    compute_venn_data,
     deseq2_venn_diagrams,
-    compute_upset_data,
     deseq2_upset_plot,
-    compute_concordance,
     compute_direction_heatmap,
     deseq2_log2fc_heatmap,
     pairwise_log2fc_scatter,
@@ -122,7 +105,6 @@ from rnaseq_explorer.viz.theme import (
     COLOR_UP,
     COLOR_DOWN,
     COLOR_NS,
-    EVENT_COLORS,
 )
 
 
@@ -469,7 +451,7 @@ def run_pipeline(config: dict) -> None:
                 cond["rmats_dir"], cols=rmats_cols, file_suffix=rmats_file_suffix
             )
 
-            print(f"\n-- rMATS Filtering --")
+            print("\n-- rMATS Filtering --")
             filtered_counts: dict[str, int] = {}
             for event_type, df in rmats_raw.items():
                 raw, filt = filter_rmats(

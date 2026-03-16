@@ -13,11 +13,10 @@ This module handles all DESeq2-related processing:
 from __future__ import annotations
 
 import json
-import os
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Optional
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -27,7 +26,6 @@ import pandas as pd
 import seaborn as sns
 
 from rnaseq_explorer.viz.theme import (
-    BIOTYPE_COLORS as _THEME_BIOTYPE_COLORS,
     COLOR_DOWN,
     COLOR_NS,
     COLOR_UP,
@@ -383,7 +381,6 @@ def normalize_deseq2_columns(
             df[id_col] = _strip_ensembl_version(df[id_col])
 
     # Detect stat and lfcSE columns (optional -- silent if missing)
-    stat_col = cols.get("stat", "stat")
     lfcse_col = cols.get("lfcSE", "lfcSE")
     log2fc_col = cols.get("log2fc", "log2FoldChange")
 

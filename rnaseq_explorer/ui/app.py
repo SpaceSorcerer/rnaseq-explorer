@@ -127,8 +127,6 @@ def main() -> None:
 
     has_counts = st.session_state.get("counts_data") is not None
     has_genewalk = st.session_state.get("genewalk_data") is not None
-    has_multi = len(st.session_state.get("condition_datasets", {})) >= 2
-
     if has_counts:
         tab_names.append("QC")
     tab_names.append("Cross-Condition")

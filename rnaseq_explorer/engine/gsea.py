@@ -9,9 +9,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional
 
-import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
@@ -122,7 +120,7 @@ def create_ranked_list(
     else:
         rank_col = log2fc_col
         if ranking_method == "stat":
-            print(f"    [INFO] Wald stat column not found -- falling back to log2FC ranking")
+            print("    [INFO] Wald stat column not found -- falling back to log2FC ranking")
         else:
             print(f"    Ranking by log2FC (column: '{log2fc_col}')")
 

@@ -46,11 +46,10 @@ def render(settings: dict) -> None:
                 (deseq2_df[padj_col] < settings["padj_cutoff"])
                 & (deseq2_df[log2fc_col].abs() >= settings["log2fc_cutoff"])
             ]
-            n_sig = len(sig)
             n_up = int((sig[log2fc_col] > 0).sum())
             n_down = int((sig[log2fc_col] < 0).sum())
         else:
-            n_sig = n_up = n_down = 0
+            n_up = n_down = 0
 
         cols[0].metric("Total Genes", f"{total_genes:,}")
         cols[1].metric("Up-regulated", f"{n_up:,}")
@@ -59,7 +58,6 @@ def render(settings: dict) -> None:
         cols[0].metric("Total Genes", "—")
         cols[1].metric("Up-regulated", "—")
         cols[2].metric("Down-regulated", "—")
-        n_sig = 0
 
     if rmats_df is not None and not rmats_df.empty:
         fdr_col = _detect_col(rmats_df, ["FDR", "fdr"])

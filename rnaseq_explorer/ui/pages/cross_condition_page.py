@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 
 from rnaseq_explorer.viz.cross_condition_viz import (
     direction_concordance_heatmap,

@@ -8,7 +8,6 @@ and scatter/volcano/distribution plots.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -505,8 +504,8 @@ def rmats_scatter(
         n_exc,
         n_inc + n_exc,
         position="lower left",
-        up_label=f"Included (dPSI\u22650.1)",
-        down_label=f"Excluded (dPSI\u2264\u22120.1)",
+        up_label="Included (dPSI\u22650.1)",
+        down_label="Excluded (dPSI\u2264\u22120.1)",
     )
 
     ax.set_xlabel("$\\Delta$PSI (IncLevelDifference)")

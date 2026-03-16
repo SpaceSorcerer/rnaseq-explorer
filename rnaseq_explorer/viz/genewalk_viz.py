@@ -6,19 +6,14 @@ gene-by-GO heatmaps, GO domain pie charts, and gene summary rankings.
 
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 from rnaseq_explorer.viz.theme import (
     PALETTE,
     CATEGORY_COLORS,
-    CONDITION_COLORS,
-    FONT_SIZE_TITLE,
-    FONT_SIZE_ANNOTATION,
     setup_plotly_theme,
 )
 
@@ -167,7 +162,7 @@ def gw_gene_bar(
     top = gene_data.nlargest(n, sim_col)
     labels = top[go_name_col].astype(str).tolist()
     # Truncate long names
-    labels = [l[:50] + "..." if len(l) > 50 else l for l in labels]
+    labels = [name[:50] + "..." if len(name) > 50 else name for name in labels]
 
     colors = []
     if padj_col in top.columns:

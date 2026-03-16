@@ -61,7 +61,7 @@ def load_counts_matrix(
         first_field = header_line.split(sep)[0].strip().strip('"')
         if first_field == "" or first_field == "X":
             df = pd.read_csv(path, sep=sep, index_col=0, quotechar='"')
-            print(f"  [INFO] Detected R row.names format -- using first column as index")
+            print("  [INFO] Detected R row.names format -- using first column as index")
         else:
             df = pd.read_csv(path, sep=sep, quotechar='"')
             if df.columns[0] in ("gene_id", "GeneID", "Geneid", "X") or \
@@ -79,7 +79,7 @@ def load_counts_matrix(
     ens_frac = idx_str.str.upper().str.startswith("ENS").sum() / max(len(idx_str), 1)
     if ens_frac > 0.1:
         df.index = idx_str.str.replace(r"\.\d+$", "", regex=True)
-        print(f"  [INFO] Stripped Ensembl version suffixes from gene index")
+        print("  [INFO] Stripped Ensembl version suffixes from gene index")
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if len(numeric_cols) < df.shape[1]:
@@ -88,7 +88,7 @@ def load_counts_matrix(
         df = df[numeric_cols]
 
     if df.shape[1] < 2:
-        print(f"[WARNING] Counts matrix has fewer than 2 sample columns, skipping")
+        print("[WARNING] Counts matrix has fewer than 2 sample columns, skipping")
         return None, {}
 
     # Auto-detect sample metadata from CONDITIONS if not provided
@@ -107,7 +107,7 @@ def load_counts_matrix(
             total = len(df.columns)
             print(f"  [INFO] Auto-detected metadata for {matched}/{total} samples from CONDITIONS")
         else:
-            print(f"  [INFO] Could not auto-detect sample metadata")
+            print("  [INFO] Could not auto-detect sample metadata")
 
     if sample_metadata is None:
         sample_metadata = {}
@@ -405,7 +405,7 @@ def compute_top_deg_heatmap(
         top_genes_stripped = [g.split(".")[0] for g in top_genes]
         mask = counts_idx.isin(top_genes_stripped)
     if mask.sum() == 0:
-        print(f"  [INFO] None of the top DEGs found in counts matrix -- skipping heatmap")
+        print("  [INFO] None of the top DEGs found in counts matrix -- skipping heatmap")
         return
 
     subset = counts_df.loc[mask].copy()

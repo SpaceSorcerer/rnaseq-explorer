@@ -11,12 +11,10 @@ from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 from rnaseq_explorer.viz.theme import (
     PALETTE,
     BIOTYPE_COLORS,
-    FONT_SIZE_TITLE,
     FONT_SIZE_ANNOTATION,
     setup_plotly_theme,
 )
@@ -120,8 +118,8 @@ def volcano_plot(
                 text=subset[gene_col] if gene_col in subset.columns else None,
                 hovertemplate=(
                     "<b>%{text}</b><br>"
-                    f"log2FC: %{{x:.3f}}<br>"
-                    f"padj: %{{customdata:.2e}}<br>"
+                    "log2FC: %{x:.3f}<br>"
+                    "padj: %{customdata:.2e}<br>"
                     "<extra></extra>"
                 ),
                 customdata=subset[padj_col],
@@ -159,8 +157,8 @@ def volcano_plot(
                     name="Genes of Interest",
                     hovertemplate=(
                         "<b>%{text}</b><br>"
-                        f"log2FC: %{{x:.3f}}<br>"
-                        f"padj: %{{customdata:.2e}}<br>"
+                        "log2FC: %{x:.3f}<br>"
+                        "padj: %{customdata:.2e}<br>"
                         "<extra></extra>"
                     ),
                     customdata=goi_df[padj_col],
@@ -243,7 +241,7 @@ def ma_plot(
                 hovertemplate=(
                     "<b>%{text}</b><br>"
                     "baseMean: %{customdata:.1f}<br>"
-                    f"log2FC: %{{y:.3f}}<br>"
+                    "log2FC: %{y:.3f}<br>"
                     "<extra></extra>"
                 ),
                 customdata=subset[basemean_col],
@@ -454,7 +452,7 @@ def top_genes_bar(
             marker_color=colors,
             hovertemplate=(
                 "<b>%{y}</b><br>"
-                f"log2FC: %{{x:.3f}}<br>"
+                "log2FC: %{x:.3f}<br>"
                 "<extra></extra>"
             ),
         )

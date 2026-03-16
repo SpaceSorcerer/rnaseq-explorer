@@ -52,3 +52,20 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/SpaceSorcerer/rnaseq-explorer"
 Repository = "https://github.com/SpaceSorcerer/rnaseq-explorer"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+exclude = [
+    "deseq2_rmats_filter_pipeline.py",
+    "pipeline_launcher.py",
+    "new_functions.py",
+    "run_4condition.py",
+    "run_hscharme_cutoffs.py",
+    "run_p01_cutoffs.py",
+    "batch_loader.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

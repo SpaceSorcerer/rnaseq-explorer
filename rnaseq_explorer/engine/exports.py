@@ -9,7 +9,6 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, date
 from itertools import combinations
 from pathlib import Path
-from typing import Optional
 from xml.dom import minidom
 
 import numpy as np
@@ -67,7 +66,7 @@ def export_excel(
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n-- Exported Files --")
+    print("\n-- Exported Files --")
 
     # DESeq2 workbook
     deseq2_xlsx = outdir / "deseq2_results.xlsx"
@@ -336,7 +335,7 @@ def _save_prism(root: ET.Element, filepath: Path) -> None:
     xml_str = ET.tostring(root, encoding="unicode")
     try:
         pretty = minidom.parseString(xml_str).toprettyxml(indent="  ")
-        lines = [l for l in pretty.split("\n") if l.strip()]
+        lines = [line for line in pretty.split("\n") if line.strip()]
         with open(filepath, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
     except Exception:
@@ -380,7 +379,6 @@ def export_prism_pzfx(
 
     fc_col = cols["log2fc"]
     padj_col = cols["padj"]
-    basemean_col = cols["basemean"]
     name_col = cols.get("gene_name", "gene_name")
 
     names = list(condition_results.keys())
@@ -656,7 +654,7 @@ def export_unfiltered_merged(
 
     outdir = Path(outdir)
     xlsx_path = outdir / "Unfiltered_All_Conditions_Merged.xlsx"
-    print(f"\n-- Exporting Unfiltered Merged Results --")
+    print("\n-- Exporting Unfiltered Merged Results --")
     print(f"   Output: {xlsx_path}")
 
     names = list(condition_results.keys())
@@ -780,7 +778,6 @@ def export_pairwise_workbook(
     dpsi_col = rmats_cols["inclevel_diff"]
     gene_col = rmats_cols["gene_name"]
     id_col_rmats = rmats_cols["gene_id"]
-    lfc_col = cols["log2fc"]
 
     def _short(label):
         parts = label.split(" vs ")

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import plotly.graph_objects as go
-import pytest
 
 from rnaseq_explorer.viz.deseq2_viz import (
     biotype_breakdown,
@@ -62,7 +60,6 @@ class TestVolcanoPlot:
     def test_has_threshold_lines(self, sample_deseq2_df):
         fig = volcano_plot(sample_deseq2_df)
         # Figure should contain hlines and vlines (stored as shapes)
-        shapes = fig.layout.shapes if fig.layout.shapes else []
         # At minimum, check figure was created with traces
         assert len(fig.data) >= 1
 

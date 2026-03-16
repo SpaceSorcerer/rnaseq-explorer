@@ -8,16 +8,11 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 from rnaseq_explorer.viz.theme import (
     PALETTE,
-    CONDITION_COLORS,
-    FONT_SIZE_TITLE,
-    FONT_SIZE_ANNOTATION,
     setup_plotly_theme,
 )
 
