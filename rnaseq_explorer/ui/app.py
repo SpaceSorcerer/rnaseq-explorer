@@ -112,6 +112,7 @@ def main() -> None:
     _store_uploaded_data(settings)
 
     # Import pages
+    from rnaseq_explorer.ui.pages import batch_import_page
     from rnaseq_explorer.ui.pages import overview
     from rnaseq_explorer.ui.pages import deseq2_page
     from rnaseq_explorer.ui.pages import splicing_page
@@ -122,7 +123,7 @@ def main() -> None:
     from rnaseq_explorer.ui.pages import gene_investigator_page
 
     # Build tab list based on available data
-    tab_names = ["Overview", "DESeq2", "Splicing", "Enrichment"]
+    tab_names = ["Import Results", "Overview", "DESeq2", "Splicing", "Enrichment"]
 
     has_counts = st.session_state.get("counts_data") is not None
     has_genewalk = st.session_state.get("genewalk_data") is not None
@@ -138,6 +139,10 @@ def main() -> None:
     tabs = st.tabs(tab_names)
 
     tab_idx = 0
+
+    with tabs[tab_idx]:
+        batch_import_page.render(settings)
+    tab_idx += 1
 
     with tabs[tab_idx]:
         overview.render(settings)
