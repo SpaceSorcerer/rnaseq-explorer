@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from rnaseq_explorer.engine.deseq2 import DEFAULT_DESEQ2_COLS, best_gene_key
+from rnaseq_explorer.engine.gsea import normalize_gsea_cols
 from rnaseq_explorer.engine.rmats import DEFAULT_RMATS_COLS, RMATS_EVENT_TYPES, COORD_COLS, make_event_key
 
 
@@ -439,6 +440,330 @@ def export_prism_pzfx(
             ("-log10(padj)", data["neg_log10_padj"].tolist()),
         ])
         _save_prism(root, prism_dir / f"volcano_data_{cond_name}.pzfx")
+
+    # rMATS column names
+    rmats_gene_col = DEFAULT_RMATS_COLS.get("gene_name", "geneSymbol")
+    dpsi_col = DEFAULT_RMATS_COLS.get("inclevel_diff", "IncLevelDifference")
+    fdr_col = DEFAULT_RMATS_COLS.get("fdr", "FDR")
+
+    # 4. Splicing_data_{condition}.pzfx — per-condition splicing events by type
+    for cond_name in names:
+        rmats_filt = condition_results[cond_name].get("rmats_filtered", {})
+        if not rmats_filt:
+            continue
+        root = _create_prism_xml()
+        label = condition_labels.get(cond_name, cond_name)
+        has_tables = False
+
+        for et, df in rmats_filt.items():
+            if len(df) > 0:
+                event_data = df.head(100)  # Top 100 per event type
+                cols_data = [("GeneSymbol", event_data[rmats_gene_col].tolist())]
+                if dpsi_col in event_data.columns:
+                    cols_data.append(("dPSI", event_data[dpsi_col].tolist()))
+                if fdr_col in event_data.columns:
+                    cols_data.append(("FDR", event_data[fdr_col].tolist()))
+                _add_table(root, f"{et}_{label}", cols_data)
+                has_tables = True
+
+        # Event counts summary
+        event_counts = [(et, len(df)) for et, df in rmats_filt.items()]
+        if event_counts:
+            _add_table(root, f"EventCounts_{label}", [
+                ("EventType", [et for et, _ in event_counts]),
+                ("Count", [cnt for _, cnt in event_counts]),
+            ])
+            has_tables = True
+
+        if has_tables:
+            _save_prism(root, prism_dir / f"Splicing_data_{cond_name}.pzfx")
+
+    # 5. GSEA_data_{condition}.pzfx — pathway enrichment per condition
+    for cond_name in names:
+        label = condition_labels.get(cond_name, cond_name)
+        gsea_prism_ok = False
+
+        # Try in-memory GSEA results first
+        if gsea_results and cond_name in gsea_results:
+            root = _create_prism_xml()
+            cond_gsea = gsea_results[cond_name]
+
+            for db_name, pathways_df in cond_gsea.items():
+                if len(pathways_df) > 0:
+                    pathway_names = pathways_df["Term"].tolist()
+                    nes_vals = pathways_df["nes"].tolist()
+                    fdr_vals = pathways_df["fdr"].tolist()
+                    neg_log10_fdr = (
+                        -np.log10(pathways_df["fdr"].clip(lower=1e-300))
+                    ).tolist()
+                    geneset_sizes = (
+                        pathways_df["geneset_size"].tolist()
+                        if "geneset_size" in pathways_df.columns
+                        else []
+                    )
+
+                    cols_data = [
+                        ("Pathway", pathway_names),
+                        ("NES", nes_vals),
+                        ("FDR", fdr_vals),
+                        ("-log10(FDR)", neg_log10_fdr),
+                    ]
+                    if geneset_sizes:
+                        cols_data.append(("GenesetSize", geneset_sizes))
+                    _add_table(root, f"{db_name[:20]}_{label}", cols_data)
+                    gsea_prism_ok = True
+
+            if gsea_prism_ok:
+                _save_prism(root, prism_dir / f"GSEA_data_{cond_name}.pzfx")
+
+        # Fallback: scan disk for gseapy CSV reports
+        if not gsea_prism_ok:
+            gsea_disk_dir = outdir / "gsea_results" / cond_name
+            disk_tables_added = False
+            if gsea_disk_dir.is_dir():
+                root = _create_prism_xml()
+                for db_subdir in sorted(gsea_disk_dir.iterdir()):
+                    if not db_subdir.is_dir():
+                        continue
+                    report_csv = db_subdir / "gseapy.gene_set.prerank.report.csv"
+                    if not report_csv.exists():
+                        continue
+                    try:
+                        rpt = normalize_gsea_cols(pd.read_csv(report_csv))
+                        if len(rpt) == 0:
+                            continue
+                        rpt["abs_nes"] = rpt["nes"].abs()
+                        rpt = rpt.sort_values("abs_nes", ascending=False).head(5)
+                        db_label = db_subdir.name[:20]
+                        neg_log10_fdr_disk = (
+                            -np.log10(rpt["fdr"].clip(lower=1e-300))
+                        ).tolist()
+                        cols_data = [
+                            ("Pathway", rpt["Term"].tolist()),
+                            ("NES", rpt["nes"].tolist()),
+                            ("FDR", rpt["fdr"].tolist()),
+                            ("-log10(FDR)", neg_log10_fdr_disk),
+                        ]
+                        if "lead_genes" in rpt.columns:
+                            cols_data.append(
+                                ("LeadGenes", rpt["lead_genes"].tolist())
+                            )
+                        _add_table(root, f"{db_label}_{label}", cols_data)
+                        disk_tables_added = True
+                    except Exception:
+                        continue
+                if disk_tables_added:
+                    _save_prism(root, prism_dir / f"GSEA_data_{cond_name}.pzfx")
+
+    # ===== CROSS-CONDITION FILES =====
+
+    # 6. Splicing_overlap_SE.pzfx — pairwise SE gene overlap
+    if len(names) >= 2:
+        root = _create_prism_xml()
+        for pair in combinations(names, 2):
+            cond1, cond2 = pair
+            label1 = condition_labels.get(cond1, cond1)
+            label2 = condition_labels.get(cond2, cond2)
+
+            se_genes1 = set()
+            se_genes2 = set()
+            rmats1 = condition_results[cond1].get("rmats_filtered", {})
+            rmats2 = condition_results[cond2].get("rmats_filtered", {})
+            if "SE" in rmats1 and rmats_gene_col in rmats1["SE"].columns:
+                se_genes1 = set(rmats1["SE"][rmats_gene_col].dropna())
+            if "SE" in rmats2 and rmats_gene_col in rmats2["SE"].columns:
+                se_genes2 = set(rmats2["SE"][rmats_gene_col].dropna())
+
+            overlap = se_genes1 & se_genes2
+            _add_table(root, f"SE_Overlap_{cond1}_vs_{cond2}", [
+                ("Metric", [f"{label1} only", f"{label2} only", "Overlap"]),
+                ("Count", [
+                    len(se_genes1 - se_genes2),
+                    len(se_genes2 - se_genes1),
+                    len(overlap),
+                ]),
+            ])
+
+            # Gene lists (top 50 from overlap)
+            overlap_list = sorted(overlap)[:50]
+            if overlap_list:
+                _add_table(root, f"SE_Genes_{cond1}_vs_{cond2}", [
+                    ("GeneSymbol", overlap_list),
+                ])
+
+        _save_prism(root, prism_dir / "Splicing_overlap_SE.pzfx")
+
+    # 7. Splicing_overlap_other_events.pzfx — pairwise A3SS/A5SS/MXE/RI overlaps
+    if len(names) >= 2:
+        root = _create_prism_xml()
+        for et in ["A3SS", "A5SS", "MXE", "RI"]:
+            for pair in combinations(names, 2):
+                cond1, cond2 = pair
+                label1 = condition_labels.get(cond1, cond1)
+                label2 = condition_labels.get(cond2, cond2)
+
+                genes1 = set()
+                genes2 = set()
+                rmats1 = condition_results[cond1].get("rmats_filtered", {})
+                rmats2 = condition_results[cond2].get("rmats_filtered", {})
+                if et in rmats1 and rmats_gene_col in rmats1[et].columns:
+                    genes1 = set(rmats1[et][rmats_gene_col].dropna())
+                if et in rmats2 and rmats_gene_col in rmats2[et].columns:
+                    genes2 = set(rmats2[et][rmats_gene_col].dropna())
+
+                overlap = genes1 & genes2
+                _add_table(root, f"{et}_{cond1}_vs_{cond2}", [
+                    ("Metric", [
+                        f"{label1} only", f"{label2} only", "Overlap",
+                    ]),
+                    ("Count", [
+                        len(genes1 - genes2),
+                        len(genes2 - genes1),
+                        len(overlap),
+                    ]),
+                ])
+
+        _save_prism(root, prism_dir / "Splicing_overlap_other_events.pzfx")
+
+    # 8. DEG_overlap.pzfx — pairwise DEG overlap with actual condition labels
+    if len(names) >= 2:
+        root = _create_prism_xml()
+        for pair in combinations(names, 2):
+            cond1, cond2 = pair
+            label1 = condition_labels.get(cond1, cond1)
+            label2 = condition_labels.get(cond2, cond2)
+
+            filt1 = condition_results[cond1]["deseq2_filtered"].get(
+                "all_genes", pd.DataFrame()
+            )
+            filt2 = condition_results[cond2]["deseq2_filtered"].get(
+                "all_genes", pd.DataFrame()
+            )
+            genes1 = (
+                set(filt1[name_col].dropna()) if name_col in filt1.columns else set()
+            )
+            genes2 = (
+                set(filt2[name_col].dropna()) if name_col in filt2.columns else set()
+            )
+            overlap = genes1 & genes2
+
+            _add_table(root, f"DEG_{cond1}_vs_{cond2}", [
+                ("Metric", [f"{label1} only", f"{label2} only", "Overlap"]),
+                ("Count", [
+                    len(genes1 - genes2),
+                    len(genes2 - genes1),
+                    len(overlap),
+                ]),
+            ])
+
+            # Shared gene list (top 50)
+            overlap_list = sorted(overlap)[:50]
+            if overlap_list:
+                _add_table(root, f"Shared_Genes_{cond1}_vs_{cond2}", [
+                    ("GeneSymbol", overlap_list),
+                ])
+
+        _save_prism(root, prism_dir / "DEG_overlap.pzfx")
+
+    # 9. Summary_statistics.pzfx — condition, DEG count, splicing count
+    root = _create_prism_xml()
+    summary_data = []
+    for cond_name in names:
+        data = condition_results[cond_name]
+        deg_count = len(
+            data["deseq2_filtered"].get("all_genes", pd.DataFrame())
+        )
+        splicing_count = sum(
+            len(df) for df in data.get("rmats_filtered", {}).values()
+        )
+        summary_data.append(
+            (condition_labels.get(cond_name, cond_name), deg_count, splicing_count)
+        )
+    if summary_data:
+        _add_table(root, "Summary_Statistics", [
+            ("Condition", [s[0] for s in summary_data]),
+            ("DEG_Count", [s[1] for s in summary_data]),
+            ("Splicing_Count", [s[2] for s in summary_data]),
+        ])
+        _save_prism(root, prism_dir / "Summary_statistics.pzfx")
+
+    # 10. Concordance_scatter.pzfx — pairwise log2FC scatter using RAW data
+    if len(names) >= 2:
+        root = _create_prism_xml()
+        has_scatter = False
+        for pair in combinations(names, 2):
+            cond1, cond2 = pair
+            # Use raw data so all shared genes appear (not just filtered DEGs)
+            df1 = condition_results[cond1].get(
+                "deseq2_raw",
+                condition_results[cond1]["deseq2_filtered"].get(
+                    "all_genes", pd.DataFrame()
+                ),
+            )
+            df2 = condition_results[cond2].get(
+                "deseq2_raw",
+                condition_results[cond2]["deseq2_filtered"].get(
+                    "all_genes", pd.DataFrame()
+                ),
+            )
+
+            if (
+                name_col not in df1.columns
+                or name_col not in df2.columns
+                or fc_col not in df1.columns
+                or fc_col not in df2.columns
+            ):
+                continue
+
+            # Merge on gene symbol — include all shared genes
+            merged = pd.merge(
+                df1[[name_col, fc_col]].dropna(),
+                df2[[name_col, fc_col]].dropna(),
+                on=name_col,
+                suffixes=("_1", "_2"),
+            )
+
+            if len(merged) > 0:
+                _add_table(root, f"Scatter_{cond1}_vs_{cond2}", [
+                    ("GeneSymbol", merged[name_col].tolist()),
+                    (f"log2FC_{cond1}", merged[f"{fc_col}_1"].tolist()),
+                    (f"log2FC_{cond2}", merged[f"{fc_col}_2"].tolist()),
+                ])
+                has_scatter = True
+
+        if has_scatter:
+            _save_prism(root, prism_dir / "Concordance_scatter.pzfx")
+
+    # 11. dPSI_distributions.pzfx — per-condition dPSI values with gene names
+    root = _create_prism_xml()
+    has_dpsi = False
+    for cond_name in names:
+        rmats_filt = condition_results[cond_name].get("rmats_filtered", {})
+        all_dpsi = []
+        all_genes = []
+        all_etypes = []
+        for et, df in rmats_filt.items():
+            if len(df) > 0 and dpsi_col in df.columns:
+                valid = df[dpsi_col].notna()
+                all_dpsi.extend(df.loc[valid, dpsi_col].tolist())
+                if rmats_gene_col in df.columns:
+                    all_genes.extend(df.loc[valid, rmats_gene_col].tolist())
+                else:
+                    all_genes.extend([""] * int(valid.sum()))
+                all_etypes.extend([et] * int(valid.sum()))
+
+        if all_dpsi:
+            # Sample 200 points for violin plot
+            n = min(200, len(all_dpsi))
+            _add_table(root, f"dPSI_{cond_name}", [
+                ("Gene", all_genes[:n]),
+                ("EventType", all_etypes[:n]),
+                ("dPSI", all_dpsi[:n]),
+            ])
+            has_dpsi = True
+
+    if has_dpsi:
+        _save_prism(root, prism_dir / "dPSI_distributions.pzfx")
 
     print(f"  Prism export complete: {len(list(prism_dir.glob('*.pzfx')))} files in {prism_dir}")
 
